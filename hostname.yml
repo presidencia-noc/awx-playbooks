@@ -1,0 +1,11 @@
+---
+- hosts: all
+
+  tasks:
+
+    - name: Mostrar hostname
+      command: hostname
+      register: salida
+
+    - debug:
+        var: salida.stdout
