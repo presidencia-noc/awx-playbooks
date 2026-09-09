@@ -1,132 +1,197 @@
 ---
 - hosts: all
   become: true
+  gather_facts: false
+
+  vars:
+    wazuh_version_objetivo: "4.14.7-1"
+    wazuh_deb_url: "https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.14.7-1_amd64.deb"
+    ocs_url: "https://inventariolinux.presidencia.gob.ar/ocsinventory"
+    ocs_cert_dir: "/var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory"
 
   tasks:
+
+    #################################################################
+    # APT PROXY
+    #################################################################
+
+    - name: Verificar existencia de 00aptproxy
+      stat:
+        path: /etc/apt/apt.conf.d/00aptproxy
+      register: aptproxy
+
+    - name: Comentar proxy APT
+      replace:
+        path: /etc/apt/apt.conf.d/00aptproxy
+        regexp: '^Acquire::http::Proxy "http://apt-cache\.presidencia\.local:3142";'
+        replace: '# Acquire::http::Proxy "http://apt-cache.presidencia.local:3142";'
+      when: aptproxy.stat.exists
+
+    #################################################################
+    # LIBERAR APT
+    #################################################################
+
+    - name: Detener unattended-upgrades
+      service:
+        name: unattended-upgrades
+        state: stopped
+      failed_when: false
+
+    - name: Buscar procesos apt y dpkg
+      shell: |
+        pgrep -f "apt|apt-get|dpkg|unattended-upgrade" || true
+      register: apt_procs
+      changed_when: false
+
+    - name: Finalizar procesos apt bloqueantes
+      shell: |
+        for pid in $(pgrep -f "apt|apt-get|dpkg|unattended-upgrade"); do
+          kill -9 $pid || true
+        done
+      when: apt_procs.stdout != ""
+
+    - name: Borrar locks de apt y dpkg
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/dpkg/lock
+        - /var/lib/dpkg/lock-frontend
+        - /var/lib/apt/lists/lock
+        - /var/cache/apt/archives/lock
+
+    - name: Reconfigurar paquetes
+      command: dpkg --configure -a
+      failed_when: false
+
+    - name: Reparar dependencias
+      command: apt-get -f install -y
+      failed_when: false
 
     #################################################################
     # OCS INVENTORY
     #################################################################
 
-    - name: Instalar OCS Inventory Agent
+    - name: Verificar instalación OCS
+      command: dpkg-query -W -f='${Version}' ocsinventory-agent
+      register: ocs_version
+      failed_when: false
+      changed_when: false
+
+    - name: Instalar o actualizar OCS
       apt:
         name: ocsinventory-agent
         state: latest
         update_cache: yes
 
-    - name: Verificar si existe configuración OCS
+    - name: Verificar configuración OCS
       stat:
         path: /etc/ocsinventory/ocsinventory-agent.cfg
       register: ocs_cfg
 
-    - name: Corregir URL HTTP a HTTPS
+    - name: Corregir URL HTTP → HTTPS
       replace:
         path: /etc/ocsinventory/ocsinventory-agent.cfg
         regexp: '^server=http://inventariolinux\.presidencia\.gob\.ar/ocsinventory'
         replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
       when: ocs_cfg.stat.exists
 
-    - name: Corregir configuracion local de OCS
+    - name: Corregir modo local
       replace:
         path: /etc/ocsinventory/ocsinventory-agent.cfg
         regexp: '^local=/var/lib/ocsinventory-agent/reports'
         replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
       when: ocs_cfg.stat.exists
 
-    - name: Crear directorio SSL OCS
+    - name: Crear directorio certificado OCS
       file:
-        path: /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory
+        path: "{{ ocs_cert_dir }}"
         state: directory
         mode: '0755'
 
     - name: Eliminar certificado previo
       file:
-        path: /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory/cacert.pem
+        path: "{{ ocs_cert_dir }}/cacert.pem"
         state: absent
 
-    - name: Descargar certificado SSL correcto
+    - name: Descargar certificado OCS
       shell: |
         openssl s_client \
           -connect inventariolinux.presidencia.gob.ar:443 \
           -servername inventariolinux.presidencia.gob.ar \
           -showcerts </dev/null 2>/dev/null \
           | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/' \
-          > /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory/cacert.pem
+          > {{ ocs_cert_dir }}/cacert.pem
       args:
         executable: /bin/bash
 
-    - name: Validar certificado descargado
+    - name: Validar certificado OCS
       command: >
         openssl x509
-        -in /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory/cacert.pem
+        -in {{ ocs_cert_dir }}/cacert.pem
         -noout
       register: cert_check
       failed_when: false
       changed_when: false
 
-    - name: Mostrar resultado validacion certificado
-      debug:
-        var: cert_check.stderr_lines
-
-    - name: Mostrar configuracion OCS
-      shell: |
-        grep -E 'server=|local=|SSL_ca_file|ca_file' /etc/ocsinventory/ocsinventory-agent.cfg
-      register: ocs_cfg_view
-      failed_when: false
-      changed_when: false
-
-    - name: Ver configuracion final de OCS
-      debug:
-        var: ocs_cfg_view.stdout_lines
-
-    - name: Ejecutar inventario OCS
+    - name: Ejecutar OCS
       command: ocsinventory-agent --debug
       register: ocs_result
       failed_when: false
 
-    - name: Mostrar resultado OCS
-      debug:
-        var: ocs_result.stderr_lines
-
     #################################################################
-    # WAZUH 4.14.7
+    # WAZUH
     #################################################################
 
-    - name: Verificar si Wazuh ya está instalado
-      stat:
-        path: /var/ossec/bin/wazuh-control
-      register: wazuh_instalado
-
-    - name: Descargar Wazuh 4.14.7
-      get_url:
-        url: https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.14.7-1_amd64.deb
-        dest: /tmp/wazuh-agent_4.14.7-1_amd64.deb
-      when: not wazuh_instalado.stat.exists
-
-    - name: Instalar agente Wazuh
+    - name: Detectar versión Wazuh
       shell: |
-        WAZUH_MANAGER='172.21.205.100' dpkg -i /tmp/wazuh-agent_4.14.7-1_amd64.deb
-      when: not wazuh_instalado.stat.exists
+        dpkg-query -W -f='${Version}' wazuh-agent 2>/dev/null || echo "NOINSTALADO"
+      register: wazuh_version
+      changed_when: false
+
+    - name: Mostrar versión Wazuh
+      debug:
+        msg: "Versión actual Wazuh: {{ wazuh_version.stdout }}"
+
+    - name: Descargar Wazuh si no existe o está desactualizado
+      get_url:
+        url: "{{ wazuh_deb_url }}"
+        dest: /tmp/wazuh-agent_4.14.7-1_amd64.deb
+      when: >
+        wazuh_version.stdout == "NOINSTALADO"
+        or
+        wazuh_version_objetivo not in wazuh_version.stdout
+
+    - name: Instalar o actualizar Wazuh
+      shell: |
+        WAZUH_MANAGER='172.21.205.100' \
+        dpkg -i /tmp/wazuh-agent_4.14.7-1_amd64.deb
+      when: >
+        wazuh_version.stdout == "NOINSTALADO"
+        or
+        wazuh_version_objetivo not in wazuh_version.stdout
 
     - name: Recargar systemd
-      systemd:
-        daemon_reload: true
+      command: systemctl daemon-reload
 
-    - name: Habilitar wazuh-agent
+    - name: Habilitar Wazuh
       systemd:
         name: wazuh-agent
         enabled: true
 
-    - name: Iniciar wazuh-agent
+    - name: Arrancar Wazuh
       systemd:
         name: wazuh-agent
         state: started
 
-    - name: Verificar estado de Wazuh
+    - name: Verificar estado Wazuh
       command: systemctl is-active wazuh-agent
-      register: wazuh_status
+      register: wazuh_estado
       changed_when: false
 
-    - name: Mostrar estado Wazuh
+    - name: Mostrar resultado final
       debug:
-        var: wazuh_status.stdout
+        msg:
+          - "OCS ejecutado."
+          - "Wazuh: {{ wazuh_version.stdout }}"
+          - "Estado Wazuh: {{ wazuh_estado.stdout }}"
