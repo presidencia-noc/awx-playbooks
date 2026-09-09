@@ -26,18 +26,25 @@
         replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
       when: ocs_cfg.stat.exists
 
-    - name: Crear directorio SSL de OCS
+    - name: Corregir configuracion local de OCS
+      replace:
+        path: /etc/ocsinventory/ocsinventory-agent.cfg
+        regexp: '^local=/var/lib/ocsinventory-agent/reports'
+        replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
+      when: ocs_cfg.stat.exists
+
+    - name: Crear directorio SSL OCS
       file:
-        path: "/var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory"
+        path: /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory
         state: directory
         mode: '0755'
 
-    - name: Eliminar certificado anterior
+    - name: Eliminar certificado previo
       file:
-        path: "/var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory/cacert.pem"
+        path: /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory/cacert.pem
         state: absent
 
-    - name: Descargar certificado válido
+    - name: Descargar certificado SSL correcto
       shell: |
         openssl s_client \
           -connect inventariolinux.presidencia.gob.ar:443 \
@@ -55,20 +62,24 @@
         -noout
       register: cert_check
       failed_when: false
+      changed_when: false
 
-    - name: Mostrar resultado validación certificado
+    - name: Mostrar resultado validacion certificado
       debug:
         var: cert_check.stderr_lines
 
-    - name: Mostrar URL configurada de OCS
-      shell: grep '^server=' /etc/ocsinventory/ocsinventory-agent.cfg
-      register: ocs_server
+    - name: Mostrar configuracion OCS
+      shell: |
+        grep -E 'server=|local=|SSL_ca_file|ca_file' /etc/ocsinventory/ocsinventory-agent.cfg
+      register: ocs_cfg_view
+      failed_when: false
       changed_when: false
 
-    - debug:
-        var: ocs_server.stdout
+    - name: Ver configuracion final de OCS
+      debug:
+        var: ocs_cfg_view.stdout_lines
 
-    - name: Ejecutar inventario OCS en modo debug
+    - name: Ejecutar inventario OCS
       command: ocsinventory-agent --debug
       register: ocs_result
       failed_when: false
@@ -86,7 +97,7 @@
         path: /var/ossec/bin/wazuh-control
       register: wazuh_instalado
 
-    - name: Descargar agente Wazuh 4.14.7
+    - name: Descargar Wazuh 4.14.7
       get_url:
         url: https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.14.7-1_amd64.deb
         dest: /tmp/wazuh-agent_4.14.7-1_amd64.deb
@@ -101,20 +112,21 @@
       systemd:
         daemon_reload: true
 
-    - name: Habilitar servicio Wazuh
+    - name: Habilitar wazuh-agent
       systemd:
         name: wazuh-agent
         enabled: true
 
-    - name: Iniciar servicio Wazuh
+    - name: Iniciar wazuh-agent
       systemd:
         name: wazuh-agent
         state: started
 
-    - name: Mostrar estado de Wazuh
+    - name: Verificar estado de Wazuh
       command: systemctl is-active wazuh-agent
       register: wazuh_status
       changed_when: false
 
-    - debug:
+    - name: Mostrar estado Wazuh
+      debug:
         var: wazuh_status.stdout
