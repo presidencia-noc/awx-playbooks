@@ -4,73 +4,117 @@
 
   tasks:
 
+    #################################################################
+    # OCS INVENTORY
+    #################################################################
+
     - name: Instalar OCS Inventory Agent
       apt:
-        name:
-          - ocsinventory-agent
-        state: present
+        name: ocsinventory-agent
+        state: latest
         update_cache: yes
 
-    - name: Verificar configuración OCS
+    - name: Verificar si existe configuración OCS
       stat:
         path: /etc/ocsinventory/ocsinventory-agent.cfg
       register: ocs_cfg
 
-    - name: Cambiar URL HTTP a HTTPS solamente si existe HTTP
+    - name: Corregir URL HTTP a HTTPS
       replace:
         path: /etc/ocsinventory/ocsinventory-agent.cfg
         regexp: '^server=http://inventariolinux\.presidencia\.gob\.ar/ocsinventory'
         replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
       when: ocs_cfg.stat.exists
 
-    - name: Crear carpeta de certificados OCS
+    - name: Crear directorio SSL de OCS
       file:
-        path: /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory
+        path: "/var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory"
         state: directory
         mode: '0755'
 
-    - name: Descargar certificado del servidor OCS
+    - name: Eliminar certificado anterior
+      file:
+        path: "/var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory/cacert.pem"
+        state: absent
+
+    - name: Descargar certificado válido
       shell: |
         openssl s_client \
-        -connect inventariolinux.presidencia.gob.ar:443 \
-        -servername inventariolinux.presidencia.gob.ar \
-        -showcerts </dev/null 2>/dev/null \
-        | sed -ne '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
-        | head -n 34 \
-        > /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory/cacert.pem
+          -connect inventariolinux.presidencia.gob.ar:443 \
+          -servername inventariolinux.presidencia.gob.ar \
+          -showcerts </dev/null 2>/dev/null \
+          | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/' \
+          > /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory/cacert.pem
       args:
         executable: /bin/bash
 
-    - name: Ejecutar inventario OCS
-      command: ocsinventory-agent
-      ignore_errors: true
+    - name: Validar certificado descargado
+      command: >
+        openssl x509
+        -in /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory/cacert.pem
+        -noout
+      register: cert_check
+      failed_when: false
 
-    - name: Verificar si Wazuh está instalado
+    - name: Mostrar resultado validación certificado
+      debug:
+        var: cert_check.stderr_lines
+
+    - name: Mostrar URL configurada de OCS
+      shell: grep '^server=' /etc/ocsinventory/ocsinventory-agent.cfg
+      register: ocs_server
+      changed_when: false
+
+    - debug:
+        var: ocs_server.stdout
+
+    - name: Ejecutar inventario OCS en modo debug
+      command: ocsinventory-agent --debug
+      register: ocs_result
+      failed_when: false
+
+    - name: Mostrar resultado OCS
+      debug:
+        var: ocs_result.stderr_lines
+
+    #################################################################
+    # WAZUH 4.14.7
+    #################################################################
+
+    - name: Verificar si Wazuh ya está instalado
       stat:
         path: /var/ossec/bin/wazuh-control
       register: wazuh_instalado
 
-    - name: Descargar paquete Wazuh
+    - name: Descargar agente Wazuh 4.14.7
       get_url:
         url: https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.14.7-1_amd64.deb
-        dest: /tmp/wazuh-agent_4.14.5-1_amd64.deb
+        dest: /tmp/wazuh-agent_4.14.7-1_amd64.deb
       when: not wazuh_instalado.stat.exists
 
-    - name: Instalar Wazuh
+    - name: Instalar agente Wazuh
       shell: |
         WAZUH_MANAGER='172.21.205.100' dpkg -i /tmp/wazuh-agent_4.14.7-1_amd64.deb
       when: not wazuh_instalado.stat.exists
 
     - name: Recargar systemd
       systemd:
-        daemon_reload: yes
+        daemon_reload: true
 
     - name: Habilitar servicio Wazuh
-      service:
+      systemd:
         name: wazuh-agent
-        enabled: yes
+        enabled: true
 
     - name: Iniciar servicio Wazuh
-      service:
+      systemd:
         name: wazuh-agent
         state: started
+
+    - name: Mostrar estado de Wazuh
+      command: systemctl is-active wazuh-agent
+      register: wazuh_status
+      changed_when: false
+
+    - debug:
+        var: wazuh_status.stdout
