@@ -6,30 +6,40 @@
   vars:
     wazuh_version_objetivo: "4.14.7-1"
     wazuh_deb_url: "https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.14.7-1_amd64.deb"
+
     ocs_url: "https://inventariolinux.presidencia.gob.ar/ocsinventory"
+
     ocs_cert_dir: "/var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory"
 
   tasks:
 
-    #################################################################
-    # APT PROXY
-    #################################################################
+##############################################################################
+# INFORMACION DEL HOST
+##############################################################################
 
-    - name: Verificar existencia de 00aptproxy
+    - name: Mostrar host
+      debug:
+        msg: "Procesando {{ inventory_hostname }}"
+
+##############################################################################
+# APT PROXY
+##############################################################################
+
+    - name: Verificar si existe 00aptproxy
       stat:
         path: /etc/apt/apt.conf.d/00aptproxy
       register: aptproxy
 
-    - name: Comentar proxy APT
+    - name: Comentar proxy APT antiguo
       replace:
         path: /etc/apt/apt.conf.d/00aptproxy
         regexp: '^Acquire::http::Proxy "http://apt-cache\.presidencia\.local:3142";'
         replace: '# Acquire::http::Proxy "http://apt-cache.presidencia.local:3142";'
       when: aptproxy.stat.exists
 
-    #################################################################
-    # LIBERAR APT
-    #################################################################
+##############################################################################
+# MANEJO SEGURO DE APT BLOQUEADO
+##############################################################################
 
     - name: Detener unattended-upgrades
       service:
@@ -37,46 +47,53 @@
         state: stopped
       failed_when: false
 
-    - name: Buscar procesos apt y dpkg
+    - name: Esperar liberacion de locks apt
       shell: |
-        pgrep -f "apt|apt-get|dpkg|unattended-upgrade" || true
-      register: apt_procs
-      changed_when: false
+        timeout=300
+        while [ $timeout -gt 0 ]; do
+          if ! fuser /var/lib/dpkg/lock >/dev/null 2>&1 && \
+             ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
+             ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1 && \
+             ! fuser /var/cache/apt/archives/lock >/dev/null 2>&1; then
+              exit 0
+          fi
 
-    - name: Finalizar procesos apt bloqueantes
-      shell: |
-        for pid in $(pgrep -f "apt|apt-get|dpkg|unattended-upgrade"); do
-          kill -9 $pid || true
+          sleep 5
+          timeout=$((timeout-5))
         done
-      when: apt_procs.stdout != ""
 
-    - name: Borrar locks de apt y dpkg
-      file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /var/lib/dpkg/lock
-        - /var/lib/dpkg/lock-frontend
-        - /var/lib/apt/lists/lock
-        - /var/cache/apt/archives/lock
+        exit 1
+      register: apt_wait
+      changed_when: false
+      failed_when: false
 
-    - name: Reconfigurar paquetes
+    - name: Mostrar estado de apt
+      debug:
+        var: apt_wait.rc
+
+    - name: Reconfigurar paquetes pendientes
       command: dpkg --configure -a
       failed_when: false
+      changed_when: false
 
-    - name: Reparar dependencias
+    - name: Reparar dependencias rotas
       command: apt-get -f install -y
       failed_when: false
-
-    #################################################################
-    # OCS INVENTORY
-    #################################################################
-
-    - name: Verificar instalación OCS
-      command: dpkg-query -W -f='${Version}' ocsinventory-agent
-      register: ocs_version
-      failed_when: false
       changed_when: false
+
+##############################################################################
+# OCS INVENTORY
+##############################################################################
+
+    - name: Verificar version instalada de OCS
+      shell: |
+        dpkg-query -W -f='${Version}' ocsinventory-agent 2>/dev/null || echo NOINSTALADO
+      register: ocs_version
+      changed_when: false
+
+    - name: Mostrar version OCS
+      debug:
+        msg: "Version OCS: {{ ocs_version.stdout }}"
 
     - name: Instalar o actualizar OCS
       apt:
@@ -84,32 +101,32 @@
         state: latest
         update_cache: yes
 
-    - name: Verificar configuración OCS
+    - name: Verificar archivo de configuracion OCS
       stat:
         path: /etc/ocsinventory/ocsinventory-agent.cfg
       register: ocs_cfg
 
-    - name: Corregir URL HTTP → HTTPS
+    - name: Corregir URL HTTP por HTTPS
       replace:
         path: /etc/ocsinventory/ocsinventory-agent.cfg
         regexp: '^server=http://inventariolinux\.presidencia\.gob\.ar/ocsinventory'
         replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
       when: ocs_cfg.stat.exists
 
-    - name: Corregir modo local
+    - name: Corregir configuracion local incorrecta
       replace:
         path: /etc/ocsinventory/ocsinventory-agent.cfg
         regexp: '^local=/var/lib/ocsinventory-agent/reports'
         replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
       when: ocs_cfg.stat.exists
 
-    - name: Crear directorio certificado OCS
+    - name: Crear directorio SSL OCS
       file:
         path: "{{ ocs_cert_dir }}"
         state: directory
-        mode: '0755'
+        mode: "0755"
 
-    - name: Eliminar certificado previo
+    - name: Eliminar certificado viejo
       file:
         path: "{{ ocs_cert_dir }}/cacert.pem"
         state: absent
@@ -125,7 +142,7 @@
       args:
         executable: /bin/bash
 
-    - name: Validar certificado OCS
+    - name: Validar certificado descargado
       command: >
         openssl x509
         -in {{ ocs_cert_dir }}/cacert.pem
@@ -134,32 +151,45 @@
       failed_when: false
       changed_when: false
 
-    - name: Ejecutar OCS
+    - name: Mostrar validacion certificado
+      debug:
+        var: cert_check.rc
+
+    - name: Mostrar configuracion final OCS
+      shell: |
+        grep -E 'server=|local=' /etc/ocsinventory/ocsinventory-agent.cfg
+      register: ocs_cfg_final
+      failed_when: false
+      changed_when: false
+
+    - debug:
+        var: ocs_cfg_final.stdout_lines
+
+    - name: Ejecutar inventario OCS
       command: ocsinventory-agent --debug
       register: ocs_result
       failed_when: false
 
-    #################################################################
-    # WAZUH
-    #################################################################
+##############################################################################
+# WAZUH
+##############################################################################
 
-    - name: Detectar versión Wazuh
+    - name: Detectar version instalada de Wazuh
       shell: |
-        dpkg-query -W -f='${Version}' wazuh-agent 2>/dev/null || echo "NOINSTALADO"
+        dpkg-query -W -f='${Version}' wazuh-agent 2>/dev/null || echo NOINSTALADO
       register: wazuh_version
       changed_when: false
 
-    - name: Mostrar versión Wazuh
+    - name: Mostrar version Wazuh
       debug:
-        msg: "Versión actual Wazuh: {{ wazuh_version.stdout }}"
+        msg: "Version Wazuh: {{ wazuh_version.stdout }}"
 
-    - name: Descargar Wazuh si no existe o está desactualizado
+    - name: Descargar Wazuh 4.14.7
       get_url:
         url: "{{ wazuh_deb_url }}"
         dest: /tmp/wazuh-agent_4.14.7-1_amd64.deb
       when: >
-        wazuh_version.stdout == "NOINSTALADO"
-        or
+        wazuh_version.stdout == "NOINSTALADO" or
         wazuh_version_objetivo not in wazuh_version.stdout
 
     - name: Instalar o actualizar Wazuh
@@ -167,19 +197,19 @@
         WAZUH_MANAGER='172.21.205.100' \
         dpkg -i /tmp/wazuh-agent_4.14.7-1_amd64.deb
       when: >
-        wazuh_version.stdout == "NOINSTALADO"
-        or
+        wazuh_version.stdout == "NOINSTALADO" or
         wazuh_version_objetivo not in wazuh_version.stdout
 
     - name: Recargar systemd
       command: systemctl daemon-reload
+      changed_when: false
 
     - name: Habilitar Wazuh
       systemd:
         name: wazuh-agent
         enabled: true
 
-    - name: Arrancar Wazuh
+    - name: Iniciar Wazuh
       systemd:
         name: wazuh-agent
         state: started
@@ -188,10 +218,15 @@
       command: systemctl is-active wazuh-agent
       register: wazuh_estado
       changed_when: false
+      failed_when: false
 
-    - name: Mostrar resultado final
+##############################################################################
+# RESUMEN FINAL
+##############################################################################
+
+    - name: Mostrar resumen
       debug:
         msg:
-          - "OCS ejecutado."
+          - "OCS: {{ ocs_version.stdout }}"
           - "Wazuh: {{ wazuh_version.stdout }}"
           - "Estado Wazuh: {{ wazuh_estado.stdout }}"
