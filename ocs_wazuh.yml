@@ -1,0 +1,76 @@
+---
+- hosts: all
+  become: true
+
+  tasks:
+
+    - name: Instalar OCS Inventory Agent
+      apt:
+        name:
+          - ocsinventory-agent
+        state: present
+        update_cache: yes
+
+    - name: Verificar configuración OCS
+      stat:
+        path: /etc/ocsinventory/ocsinventory-agent.cfg
+      register: ocs_cfg
+
+    - name: Cambiar URL HTTP a HTTPS solamente si existe HTTP
+      replace:
+        path: /etc/ocsinventory/ocsinventory-agent.cfg
+        regexp: '^server=http://inventariolinux\.presidencia\.gob\.ar/ocsinventory'
+        replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
+      when: ocs_cfg.stat.exists
+
+    - name: Crear carpeta de certificados OCS
+      file:
+        path: /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory
+        state: directory
+        mode: '0755'
+
+    - name: Descargar certificado del servidor OCS
+      shell: |
+        openssl s_client \
+        -connect inventariolinux.presidencia.gob.ar:443 \
+        -servername inventariolinux.presidencia.gob.ar \
+        -showcerts </dev/null 2>/dev/null \
+        | sed -ne '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
+        | head -n 34 \
+        > /var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory/cacert.pem
+      args:
+        executable: /bin/bash
+
+    - name: Ejecutar inventario OCS
+      command: ocsinventory-agent
+      ignore_errors: true
+
+    - name: Verificar si Wazuh está instalado
+      stat:
+        path: /var/ossec/bin/wazuh-control
+      register: wazuh_instalado
+
+    - name: Descargar paquete Wazuh
+      get_url:
+        url: https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.14.7-1_amd64.deb
+        dest: /tmp/wazuh-agent_4.14.5-1_amd64.deb
+      when: not wazuh_instalado.stat.exists
+
+    - name: Instalar Wazuh
+      shell: |
+        WAZUH_MANAGER='172.21.205.100' dpkg -i /tmp/wazuh-agent_4.14.7-1_amd64.deb
+      when: not wazuh_instalado.stat.exists
+
+    - name: Recargar systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Habilitar servicio Wazuh
+      service:
+        name: wazuh-agent
+        enabled: yes
+
+    - name: Iniciar servicio Wazuh
+      service:
+        name: wazuh-agent
+        state: started
