@@ -1,113 +1,279 @@
 ---
-- hosts: all
+- name: Instalar y configurar OCS Inventory y Wazuh Agent
+  hosts: all
   become: true
   gather_facts: false
 
   vars:
+    ##########################################################################
+    # WAZUH
+    ##########################################################################
+
     wazuh_version_objetivo: "4.14.7-1"
+
     wazuh_deb_url: "https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.14.7-1_amd64.deb"
+
+    wazuh_deb_path: "/tmp/wazuh-agent_4.14.7-1_amd64.deb"
+
+    wazuh_config_path: "/var/ossec/etc/ossec.conf"
+
+    wazuh_manager_ip: "172.21.205.100"
+    wazuh_manager_port: "1514"
+    wazuh_manager_protocol: "tcp"
+
+    ##########################################################################
+    # OCS INVENTORY
+    ##########################################################################
 
     ocs_url: "https://inventariolinux.presidencia.gob.ar/ocsinventory"
 
+    ocs_config_path: "/etc/ocsinventory/ocsinventory-agent.cfg"
+
     ocs_cert_dir: "/var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory"
 
-  tasks:
+    ocs_cert_path: "{{ ocs_cert_dir }}/cacert.pem"
 
+  handlers:
+    ##########################################################################
+    # HANDLERS
+    ##########################################################################
+
+    - name: Reiniciar Wazuh Agent
+      ansible.builtin.systemd:
+        name: wazuh-agent
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+  tasks:
     ##########################################################################
     # HOST
     ##########################################################################
 
-    - name: Mostrar host
-      debug:
+    - name: Mostrar host que se está procesando
+      ansible.builtin.debug:
         msg: "Procesando {{ inventory_hostname }}"
 
-##############################################################################
-# APT PROXY
-##############################################################################
+    ##########################################################################
+    # COMPROBACIONES INICIALES
+    ##########################################################################
+
+    - name: Verificar que el sistema utiliza dpkg
+      ansible.builtin.stat:
+        path: /usr/bin/dpkg
+      register: dpkg_bin
+
+    - name: Finalizar host si no utiliza dpkg
+      ansible.builtin.fail:
+        msg: >-
+          El equipo {{ inventory_hostname }} no utiliza dpkg.
+          Este playbook solamente es compatible con Debian y Ubuntu.
+      when: not dpkg_bin.stat.exists
+
+    ##########################################################################
+    # APT PROXY
+    ##########################################################################
 
     - name: Verificar si existe 00aptproxy
-      stat:
+      ansible.builtin.stat:
         path: /etc/apt/apt.conf.d/00aptproxy
       register: aptproxy
 
-    - name: Comentar todas las lineas activas de 00aptproxy
-      replace:
+    - name: Comentar todas las líneas activas de 00aptproxy
+      ansible.builtin.replace:
         path: /etc/apt/apt.conf.d/00aptproxy
-        regexp: '^(?!#)(.*)$'
-        replace: '# \1'
+        regexp: '^(\s*)(?!#)(\S.*)$'
+        replace: '\1# \2'
+        backup: true
       when: aptproxy.stat.exists
 
-    - name: Mostrar configuracion final del proxy
-      command: cat /etc/apt/apt.conf.d/00aptproxy
+    - name: Leer configuración final del proxy
+      ansible.builtin.command:
+        argv:
+          - cat
+          - /etc/apt/apt.conf.d/00aptproxy
       register: aptproxy_content
       changed_when: false
       when: aptproxy.stat.exists
 
-    - name: Mostrar contenido del proxy
-      debug:
+    - name: Mostrar contenido final del proxy
+      ansible.builtin.debug:
         var: aptproxy_content.stdout_lines
       when: aptproxy.stat.exists
 
+    - name: Informar que no existe el archivo de proxy
+      ansible.builtin.debug:
+        msg: "No existe /etc/apt/apt.conf.d/00aptproxy"
+      when: not aptproxy.stat.exists
+
     ##########################################################################
-    # MANEJO APT BLOQUEADO
+    # MANEJO SEGURO DE BLOQUEOS DE APT
     ##########################################################################
 
     - name: Detener unattended-upgrades
-      service:
+      ansible.builtin.service:
         name: unattended-upgrades
         state: stopped
       failed_when: false
 
-    - name: Esperar liberacion de apt
-      shell: |
-        timeout=60
+    - name: Detener apt-daily
+      ansible.builtin.systemd:
+        name: apt-daily.service
+        state: stopped
+      failed_when: false
 
-        while [ $timeout -gt 0 ]; do
+    - name: Detener apt-daily-upgrade
+      ansible.builtin.systemd:
+        name: apt-daily-upgrade.service
+        state: stopped
+      failed_when: false
+
+    - name: Detener temporizadores automáticos de APT
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - apt-daily.timer
+        - apt-daily-upgrade.timer
+      failed_when: false
+
+    - name: Esperar hasta 120 segundos a que APT libere los bloqueos
+      ansible.builtin.shell: |
+        timeout=120
+
+        while [ "$timeout" -gt 0 ]; do
           if ! fuser /var/lib/dpkg/lock >/dev/null 2>&1 && \
              ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
              ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1 && \
              ! fuser /var/cache/apt/archives/lock >/dev/null 2>&1; then
-             exit 0
+            exit 0
           fi
 
           sleep 5
-          timeout=$((timeout-5))
+          timeout=$((timeout - 5))
         done
 
         exit 1
+      args:
+        executable: /bin/bash
       register: apt_wait
-      failed_when: false
       changed_when: false
+      failed_when: false
 
-    - name: Buscar procesos bloqueando apt
-      shell: |
-        (
-          fuser /var/lib/dpkg/lock 2>/dev/null
-          fuser /var/lib/dpkg/lock-frontend 2>/dev/null
-          fuser /var/lib/apt/lists/lock 2>/dev/null
-          fuser /var/cache/apt/archives/lock 2>/dev/null
-        ) | tr ' ' '\n' | sort -u | grep -E '^[0-9]+$' || true
+    - name: Buscar procesos que siguen bloqueando APT
+      ansible.builtin.shell: |
+        {
+          fuser /var/lib/dpkg/lock 2>/dev/null || true
+          fuser /var/lib/dpkg/lock-frontend 2>/dev/null || true
+          fuser /var/lib/apt/lists/lock 2>/dev/null || true
+          fuser /var/cache/apt/archives/lock 2>/dev/null || true
+        } |
+        tr ' ' '\n' |
+        grep -E '^[0-9]+$' |
+        sort -u || true
+      args:
+        executable: /bin/bash
       register: apt_lock_pids
       changed_when: false
       when: apt_wait.rc != 0
 
-    - name: Mostrar procesos bloqueando apt
-      debug:
-        var: apt_lock_pids.stdout_lines
+    - name: Mostrar procesos que bloquean APT
+      ansible.builtin.debug:
+        msg: >-
+          Procesos detectados bloqueando APT:
+          {{ apt_lock_pids.stdout_lines | default([]) }}
       when: apt_wait.rc != 0
 
-    - name: Finalizar procesos bloqueantes
-      shell: |
-        for pid in {{ apt_lock_pids.stdout_lines | join(' ') }}; do
-          kill -9 "$pid" || true
+    - name: Enviar SIGTERM a los procesos bloqueantes
+      ansible.builtin.shell: |
+        for pid in {{ apt_lock_pids.stdout_lines | default([]) | join(' ') }}; do
+          if [ -d "/proc/$pid" ]; then
+            kill -15 "$pid" 2>/dev/null || true
+          fi
         done
+      args:
+        executable: /bin/bash
       when:
         - apt_wait.rc != 0
-        - apt_lock_pids.stdout != ""
+        - apt_lock_pids.stdout | default('') | length > 0
+      register: apt_sigterm
+      changed_when: apt_sigterm.rc == 0
       failed_when: false
 
-    - name: Eliminar locks residuales
-      file:
+    - name: Esperar después de enviar SIGTERM
+      ansible.builtin.pause:
+        seconds: 10
+      when:
+        - apt_wait.rc != 0
+        - apt_lock_pids.stdout | default('') | length > 0
+
+    - name: Buscar procesos que continúan bloqueando APT
+      ansible.builtin.shell: |
+        {
+          fuser /var/lib/dpkg/lock 2>/dev/null || true
+          fuser /var/lib/dpkg/lock-frontend 2>/dev/null || true
+          fuser /var/lib/apt/lists/lock 2>/dev/null || true
+          fuser /var/cache/apt/archives/lock 2>/dev/null || true
+        } |
+        tr ' ' '\n' |
+        grep -E '^[0-9]+$' |
+        sort -u || true
+      args:
+        executable: /bin/bash
+      register: apt_remaining_pids
+      changed_when: false
+      when: apt_wait.rc != 0
+
+    - name: Enviar SIGKILL a procesos que no respondieron
+      ansible.builtin.shell: |
+        for pid in {{ apt_remaining_pids.stdout_lines | default([]) | join(' ') }}; do
+          if [ -d "/proc/$pid" ]; then
+            kill -9 "$pid" 2>/dev/null || true
+          fi
+        done
+      args:
+        executable: /bin/bash
+      when:
+        - apt_wait.rc != 0
+        - apt_remaining_pids.stdout | default('') | length > 0
+      register: apt_sigkill
+      changed_when: apt_sigkill.rc == 0
+      failed_when: false
+
+    - name: Esperar después de enviar SIGKILL
+      ansible.builtin.pause:
+        seconds: 5
+      when:
+        - apt_wait.rc != 0
+        - apt_remaining_pids.stdout | default('') | length > 0
+
+    - name: Comprobar si todavía existen procesos bloqueantes
+      ansible.builtin.shell: |
+        {
+          fuser /var/lib/dpkg/lock 2>/dev/null || true
+          fuser /var/lib/dpkg/lock-frontend 2>/dev/null || true
+          fuser /var/lib/apt/lists/lock 2>/dev/null || true
+          fuser /var/cache/apt/archives/lock 2>/dev/null || true
+        } |
+        tr ' ' '\n' |
+        grep -E '^[0-9]+$' |
+        sort -u || true
+      args:
+        executable: /bin/bash
+      register: apt_final_lock_pids
+      changed_when: false
+
+    - name: Detener ejecución si APT continúa bloqueado
+      ansible.builtin.fail:
+        msg: >-
+          APT continúa bloqueado en {{ inventory_hostname }}.
+          Procesos detectados:
+          {{ apt_final_lock_pids.stdout_lines | default([]) }}.
+          No se eliminarán los archivos lock mientras existan procesos activos.
+      when: apt_final_lock_pids.stdout | default('') | length > 0
+
+    - name: Eliminar archivos lock residuales
+      ansible.builtin.file:
         path: "{{ item }}"
         state: absent
       loop:
@@ -116,164 +282,580 @@
         - /var/lib/apt/lists/lock
         - /var/cache/apt/archives/lock
 
-    - name: Reconfigurar paquetes
-      command: dpkg --configure -a
+    - name: Reconfigurar paquetes pendientes
+      ansible.builtin.command:
+        argv:
+          - dpkg
+          - --configure
+          - -a
+      register: dpkg_configure
+      changed_when: dpkg_configure.rc == 0
       failed_when: false
 
-    - name: Reparar dependencias
-      command: apt-get -f install -y
+    - name: Reparar dependencias pendientes
+      ansible.builtin.command:
+        argv:
+          - apt-get
+          - -f
+          - install
+          - -y
+      register: apt_repair
+      changed_when: >-
+        '0 upgraded, 0 newly installed, 0 to remove' not in apt_repair.stdout
       failed_when: false
 
     ##########################################################################
-    # OCS
+    # PAQUETES NECESARIOS
     ##########################################################################
 
-    - name: Detectar version OCS
-      shell: |
-        dpkg-query -W -f='${Version}' ocsinventory-agent 2>/dev/null || echo NOINSTALADO
-      register: ocs_version
+    - name: Actualizar caché de APT
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      register: apt_cache_result
+      retries: 3
+      delay: 10
+      until: apt_cache_result is succeeded
+
+    - name: Instalar dependencias necesarias
+      ansible.builtin.apt:
+        name:
+          - openssl
+          - psmisc
+          - python3
+          - ca-certificates
+        state: present
+      register: dependencias_result
+      retries: 3
+      delay: 10
+      until: dependencias_result is succeeded
+
+    ##########################################################################
+    # OCS INVENTORY
+    ##########################################################################
+
+    - name: Detectar versión instalada de OCS
+      ansible.builtin.shell: |
+        dpkg-query -W -f='${Version}' ocsinventory-agent 2>/dev/null \
+          || echo NOINSTALADO
+      args:
+        executable: /bin/bash
+      register: ocs_version_inicial
       changed_when: false
 
-    - name: Mostrar version OCS
-      debug:
-        msg: "OCS={{ ocs_version.stdout }}"
+    - name: Mostrar versión inicial de OCS
+      ansible.builtin.debug:
+        msg: "OCS inicial={{ ocs_version_inicial.stdout }}"
 
-    - name: Instalar o actualizar OCS
-      apt:
+    - name: Instalar o actualizar OCS Inventory Agent
+      ansible.builtin.apt:
         name: ocsinventory-agent
         state: latest
-        update_cache: yes
+        update_cache: false
+      register: ocs_install
+      retries: 3
+      delay: 10
+      until: ocs_install is succeeded
 
-    - name: Verificar configuracion OCS
-      stat:
-        path: /etc/ocsinventory/ocsinventory-agent.cfg
+    - name: Verificar que existe la configuración de OCS
+      ansible.builtin.stat:
+        path: "{{ ocs_config_path }}"
       register: ocs_cfg
 
-    - name: Corregir server HTTP
-      replace:
-        path: /etc/ocsinventory/ocsinventory-agent.cfg
-        regexp: '^server=http://inventariolinux\.presidencia\.gob\.ar/ocsinventory'
-        replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
-      when: ocs_cfg.stat.exists
+    - name: Detener ejecución si no existe la configuración de OCS
+      ansible.builtin.fail:
+        msg: >-
+          OCS Inventory Agent está instalado, pero no existe
+          {{ ocs_config_path }}.
+      when: not ocs_cfg.stat.exists
 
-    - name: Corregir modo local
-      replace:
-        path: /etc/ocsinventory/ocsinventory-agent.cfg
-        regexp: '^local=/var/lib/ocsinventory-agent/reports'
-        replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
-      when: ocs_cfg.stat.exists
+    - name: Eliminar configuraciones server existentes
+      ansible.builtin.lineinfile:
+        path: "{{ ocs_config_path }}"
+        regexp: '^\s*server\s*='
+        state: absent
+        backup: true
 
-    - name: Crear directorio certificado OCS
-      file:
-        path: "{{ ocs_cert_dir }}"
-        state: directory
-        mode: "0755"
-
-    - name: Eliminar certificado viejo
-      file:
-        path: "{{ ocs_cert_dir }}/cacert.pem"
+    - name: Eliminar configuración de modo local
+      ansible.builtin.lineinfile:
+        path: "{{ ocs_config_path }}"
+        regexp: '^\s*local\s*='
         state: absent
 
-    - name: Descargar certificado OCS
-      shell: |
+    - name: Configurar servidor HTTPS de OCS
+      ansible.builtin.lineinfile:
+        path: "{{ ocs_config_path }}"
+        line: "server={{ ocs_url }}"
+        insertafter: EOF
+        state: present
+
+    - name: Crear directorio para el certificado de OCS
+      ansible.builtin.file:
+        path: "{{ ocs_cert_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Descargar cadena de certificados de OCS
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        temporal="$(mktemp)"
+
         openssl s_client \
           -connect inventariolinux.presidencia.gob.ar:443 \
           -servername inventariolinux.presidencia.gob.ar \
-          -showcerts </dev/null 2>/dev/null \
-          | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/' \
-          > "{{ ocs_cert_dir }}/cacert.pem"
+          -showcerts </dev/null 2>/dev/null |
+          awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' \
+          > "$temporal"
+
+        if ! openssl x509 -in "$temporal" -noout >/dev/null 2>&1; then
+          rm -f "$temporal"
+          exit 1
+        fi
+
+        if [ -f "{{ ocs_cert_path }}" ] &&
+           cmp -s "$temporal" "{{ ocs_cert_path }}"; then
+          rm -f "$temporal"
+          echo "SIN_CAMBIOS"
+          exit 0
+        fi
+
+        install -o root -g root -m 0644 \
+          "$temporal" "{{ ocs_cert_path }}"
+
+        rm -f "$temporal"
+        echo "ACTUALIZADO"
       args:
         executable: /bin/bash
+      register: ocs_cert_download
+      changed_when: "'ACTUALIZADO' in ocs_cert_download.stdout"
+      retries: 3
+      delay: 10
+      until: ocs_cert_download.rc == 0
 
-    - name: Validar certificado
-      command:
+    - name: Validar certificado de OCS
+      ansible.builtin.command:
         argv:
           - openssl
           - x509
           - -in
-          - "{{ ocs_cert_dir }}/cacert.pem"
+          - "{{ ocs_cert_path }}"
           - -noout
-      register: cert_check
-      failed_when: false
+          - -subject
+          - -issuer
+          - -dates
+      register: ocs_cert_check
       changed_when: false
 
-    - name: Mostrar validacion certificado
-      debug:
-        var: cert_check.rc
+    - name: Mostrar validación del certificado de OCS
+      ansible.builtin.debug:
+        var: ocs_cert_check.stdout_lines
 
-    - name: Mostrar configuracion OCS
-      shell: grep -E 'server=|local=' /etc/ocsinventory/ocsinventory-agent.cfg
+    - name: Leer configuración final de OCS
+      ansible.builtin.shell: |
+        grep -E '^[[:space:]]*(server|local)[[:space:]]*=' \
+          "{{ ocs_config_path }}" || true
+      args:
+        executable: /bin/bash
       register: ocs_cfg_final
-      failed_when: false
       changed_when: false
 
-    - debug:
+    - name: Mostrar configuración final de OCS
+      ansible.builtin.debug:
         var: ocs_cfg_final.stdout_lines
 
     - name: Ejecutar inventario OCS
-      command: ocsinventory-agent --debug
+      ansible.builtin.command:
+        argv:
+          - ocsinventory-agent
+          - --debug
       register: ocs_result
+      changed_when: false
       failed_when: false
 
+    - name: Mostrar resultado de la ejecución de OCS
+      ansible.builtin.debug:
+        msg:
+          - "Código de salida OCS={{ ocs_result.rc }}"
+          - "Salida OCS={{ ocs_result.stdout_lines | default([]) }}"
+          - "Error OCS={{ ocs_result.stderr_lines | default([]) }}"
+      when: ocs_result.rc != 0
+
     ##########################################################################
-    # WAZUH
+    # WAZUH AGENT
     ##########################################################################
 
-    - name: Detectar version Wazuh
-      shell: |
-        dpkg-query -W -f='${Version}' wazuh-agent 2>/dev/null || echo NOINSTALADO
-      register: wazuh_version
+    - name: Detectar versión instalada de Wazuh Agent
+      ansible.builtin.shell: |
+        dpkg-query -W -f='${Version}' wazuh-agent 2>/dev/null \
+          || echo NOINSTALADO
+      args:
+        executable: /bin/bash
+      register: wazuh_version_inicial
       changed_when: false
 
-    - name: Mostrar version Wazuh
-      debug:
-        msg: "Wazuh={{ wazuh_version.stdout }}"
+    - name: Mostrar versión inicial de Wazuh
+      ansible.builtin.debug:
+        msg: "Wazuh inicial={{ wazuh_version_inicial.stdout }}"
 
-    - name: Descargar Wazuh
-      get_url:
+    - name: Determinar si Wazuh debe instalarse o actualizarse
+      ansible.builtin.set_fact:
+        wazuh_requiere_instalacion: >-
+          {{
+            wazuh_version_inicial.stdout == 'NOINSTALADO'
+            or
+            wazuh_version_inicial.stdout != wazuh_version_objetivo
+          }}
+
+    - name: Mostrar decisión de instalación de Wazuh
+      ansible.builtin.debug:
+        msg: >-
+          Wazuh requiere instalación o actualización:
+          {{ wazuh_requiere_instalacion }}
+
+    - name: Descargar paquete de Wazuh Agent
+      ansible.builtin.get_url:
         url: "{{ wazuh_deb_url }}"
-        dest: /tmp/wazuh-agent_4.14.7-1_amd64.deb
-      when: >
-        wazuh_version.stdout == "NOINSTALADO"
-        or
-        wazuh_version_objetivo not in wazuh_version.stdout
+        dest: "{{ wazuh_deb_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        force: true
+        timeout: 60
+      register: wazuh_download
+      retries: 3
+      delay: 10
+      until: wazuh_download is succeeded
+      when: wazuh_requiere_instalacion
 
-    - name: Instalar o actualizar Wazuh
-      shell: |
-        WAZUH_MANAGER='172.21.205.100' \
-        dpkg -i /tmp/wazuh-agent_4.14.7-1_amd64.deb
-      when: >
-        wazuh_version.stdout == "NOINSTALADO"
-        or
-        wazuh_version_objetivo not in wazuh_version.stdout
+    - name: Instalar o actualizar Wazuh Agent
+      ansible.builtin.shell: |
+        set -o pipefail
 
-    - name: Recargar systemd
-      command: systemctl daemon-reload
+        export WAZUH_MANAGER="{{ wazuh_manager_ip }}"
+
+        if dpkg -i "{{ wazuh_deb_path }}"; then
+          exit 0
+        fi
+
+        apt-get -f install -y
+
+        dpkg -i "{{ wazuh_deb_path }}"
+      args:
+        executable: /bin/bash
+      register: wazuh_install
+      when: wazuh_requiere_instalacion
+
+    - name: Recargar systemd después de instalar Wazuh
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: wazuh_requiere_instalacion
+
+    - name: Verificar que existe ossec.conf
+      ansible.builtin.stat:
+        path: "{{ wazuh_config_path }}"
+      register: wazuh_config_stat
+
+    - name: Detener ejecución si no existe ossec.conf
+      ansible.builtin.fail:
+        msg: >-
+          Wazuh Agent está instalado, pero no existe
+          {{ wazuh_config_path }}.
+      when: not wazuh_config_stat.stat.exists
+
+    - name: Crear copia de seguridad de ossec.conf
+      ansible.builtin.copy:
+        src: "{{ wazuh_config_path }}"
+        dest: "{{ wazuh_config_path }}.backup-awx"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0640"
+        force: false
+
+    ##########################################################################
+    # VALIDACIÓN Y CORRECCIÓN DE OSSEC.CONF
+    ##########################################################################
+
+    - name: Validar y corregir manager, puerto y protocolo en ossec.conf
+      ansible.builtin.shell: |
+        python3 - <<'PYTHON'
+        import os
+        import sys
+        import xml.etree.ElementTree as ET
+
+        config_path = "{{ wazuh_config_path }}"
+        manager_ip = "{{ wazuh_manager_ip }}"
+        manager_port = "{{ wazuh_manager_port }}"
+        manager_protocol = "{{ wazuh_manager_protocol }}"
+
+        try:
+            tree = ET.parse(config_path)
+        except ET.ParseError as error:
+            print("ERROR_XML: {0}".format(error))
+            sys.exit(2)
+        except IOError as error:
+            print("ERROR_ARCHIVO: {0}".format(error))
+            sys.exit(3)
+
+        root = tree.getroot()
+        changed = False
+
+        if root.tag == "ossec_config":
+            ossec_root = root
+        else:
+            ossec_root = root.find("ossec_config")
+
+        if ossec_root is None:
+            print("ERROR: no se encontró el elemento ossec_config")
+            sys.exit(4)
+
+        client = ossec_root.find("client")
+
+        if client is None:
+            client = ET.SubElement(ossec_root, "client")
+            changed = True
+
+        server = client.find("server")
+
+        if server is None:
+            server = ET.SubElement(client, "server")
+            changed = True
+
+        address = server.find("address")
+
+        if address is None:
+            address = ET.SubElement(server, "address")
+            changed = True
+
+        if (address.text or "").strip() != manager_ip:
+            address.text = manager_ip
+            changed = True
+
+        port = server.find("port")
+
+        if port is None:
+            port = ET.SubElement(server, "port")
+            changed = True
+
+        if (port.text or "").strip() != manager_port:
+            port.text = manager_port
+            changed = True
+
+        protocol = server.find("protocol")
+
+        if protocol is None:
+            protocol = ET.SubElement(server, "protocol")
+            changed = True
+
+        if (protocol.text or "").strip().lower() != manager_protocol.lower():
+            protocol.text = manager_protocol
+            changed = True
+
+        if changed:
+            temporary_path = config_path + ".awx.tmp"
+
+            tree.write(
+                temporary_path,
+                encoding="UTF-8",
+                xml_declaration=True
+            )
+
+            os.chmod(temporary_path, 0o640)
+            os.rename(temporary_path, config_path)
+
+            print("CONFIGURACION_ACTUALIZADA")
+        else:
+            print("CONFIGURACION_CORRECTA")
+
+        print("MANAGER={0}".format(manager_ip))
+        print("PUERTO={0}".format(manager_port))
+        print("PROTOCOLO={0}".format(manager_protocol))
+        PYTHON
+      args:
+        executable: /bin/bash
+      register: wazuh_config_result
+      changed_when: >-
+        'CONFIGURACION_ACTUALIZADA' in wazuh_config_result.stdout
+      notify: Reiniciar Wazuh Agent
+
+    - name: Mostrar resultado de configuración de ossec.conf
+      ansible.builtin.debug:
+        var: wazuh_config_result.stdout_lines
+
+    - name: Validar sintaxis XML de ossec.conf
+      ansible.builtin.shell: |
+        python3 - <<'PYTHON'
+        import sys
+        import xml.etree.ElementTree as ET
+
+        try:
+            ET.parse("{{ wazuh_config_path }}")
+            print("XML_VALIDO")
+            sys.exit(0)
+        except Exception as error:
+            print("XML_INVALIDO: {0}".format(error))
+            sys.exit(1)
+        PYTHON
+      args:
+        executable: /bin/bash
+      register: wazuh_xml_validation
       changed_when: false
 
-    - name: Habilitar Wazuh
-      systemd:
+    - name: Validar valores finales de Wazuh
+      ansible.builtin.shell: |
+        python3 - <<'PYTHON'
+        import sys
+        import xml.etree.ElementTree as ET
+
+        config_path = "{{ wazuh_config_path }}"
+        expected_address = "{{ wazuh_manager_ip }}"
+        expected_port = "{{ wazuh_manager_port }}"
+        expected_protocol = "{{ wazuh_manager_protocol }}"
+
+        tree = ET.parse(config_path)
+        root = tree.getroot()
+
+        client = root.find("client")
+
+        if client is None:
+            print("ERROR: no existe la sección client")
+            sys.exit(1)
+
+        server = client.find("server")
+
+        if server is None:
+            print("ERROR: no existe la sección client/server")
+            sys.exit(1)
+
+        address_node = server.find("address")
+        port_node = server.find("port")
+        protocol_node = server.find("protocol")
+
+        address = (
+            address_node.text.strip()
+            if address_node is not None and address_node.text
+            else ""
+        )
+
+        port = (
+            port_node.text.strip()
+            if port_node is not None and port_node.text
+            else ""
+        )
+
+        protocol = (
+            protocol_node.text.strip().lower()
+            if protocol_node is not None and protocol_node.text
+            else ""
+        )
+
+        errors = []
+
+        if address != expected_address:
+            errors.append(
+                "address esperado={0}, encontrado={1}".format(
+                    expected_address,
+                    address
+                )
+            )
+
+        if port != expected_port:
+            errors.append(
+                "port esperado={0}, encontrado={1}".format(
+                    expected_port,
+                    port
+                )
+            )
+
+        if protocol != expected_protocol.lower():
+            errors.append(
+                "protocol esperado={0}, encontrado={1}".format(
+                    expected_protocol,
+                    protocol
+                )
+            )
+
+        print("ADDRESS={0}".format(address))
+        print("PORT={0}".format(port))
+        print("PROTOCOL={0}".format(protocol))
+
+        if errors:
+            for error in errors:
+                print("ERROR: {0}".format(error))
+            sys.exit(1)
+
+        print("CONFIGURACION_WAZUH_VALIDADA")
+        PYTHON
+      args:
+        executable: /bin/bash
+      register: wazuh_final_validation
+      changed_when: false
+
+    - name: Mostrar validación final de Wazuh
+      ansible.builtin.debug:
+        var: wazuh_final_validation.stdout_lines
+
+    - name: Aplicar reinicio pendiente de Wazuh
+      ansible.builtin.meta: flush_handlers
+
+    - name: Habilitar e iniciar Wazuh Agent
+      ansible.builtin.systemd:
         name: wazuh-agent
         enabled: true
-
-    - name: Iniciar Wazuh
-      systemd:
-        name: wazuh-agent
         state: started
+        daemon_reload: true
 
-    - name: Verificar estado Wazuh
-      command: systemctl is-active wazuh-agent
+    - name: Verificar estado de Wazuh Agent
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-active
+          - wazuh-agent
       register: wazuh_estado
       changed_when: false
       failed_when: false
+
+    - name: Consultar versión final de Wazuh Agent
+      ansible.builtin.shell: |
+        dpkg-query -W -f='${Version}' wazuh-agent 2>/dev/null \
+          || echo NOINSTALADO
+      args:
+        executable: /bin/bash
+      register: wazuh_version_final
+      changed_when: false
+
+    - name: Consultar versión final de OCS Inventory Agent
+      ansible.builtin.shell: |
+        dpkg-query -W -f='${Version}' ocsinventory-agent 2>/dev/null \
+          || echo NOINSTALADO
+      args:
+        executable: /bin/bash
+      register: ocs_version_final
+      changed_when: false
+
+    - name: Eliminar paquete temporal de Wazuh
+      ansible.builtin.file:
+        path: "{{ wazuh_deb_path }}"
+        state: absent
 
     ##########################################################################
     # RESUMEN
     ##########################################################################
 
-    - name: Mostrar resumen
-      debug:
+    - name: Mostrar resumen final
+      ansible.builtin.debug:
         msg:
-          - "OCS={{ ocs_version.stdout }}"
-          - "WAZUH={{ wazuh_version.stdout }}"
+          - "HOST={{ inventory_hostname }}"
+          - "OCS_INICIAL={{ ocs_version_inicial.stdout }}"
+          - "OCS_FINAL={{ ocs_version_final.stdout }}"
+          - "OCS_EJECUCION_RC={{ ocs_result.rc }}"
+          - "WAZUH_INICIAL={{ wazuh_version_inicial.stdout }}"
+          - "WAZUH_FINAL={{ wazuh_version_final.stdout }}"
+          - "WAZUH_MANAGER={{ wazuh_manager_ip }}"
+          - "WAZUH_PORT={{ wazuh_manager_port }}"
+          - "WAZUH_PROTOCOL={{ wazuh_manager_protocol }}"
           - "ESTADO_WAZUH={{ wazuh_estado.stdout }}"
+``
