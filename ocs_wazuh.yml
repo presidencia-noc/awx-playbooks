@@ -282,7 +282,7 @@
         - /var/lib/apt/lists/lock
         - /var/cache/apt/archives/lock
 
-      - name: Reconfigurar paquetes pendientes
+    - name: Reconfigurar paquetes pendientes
       shell: |
         timeout 600 dpkg --configure -a
       register: dpkg_configure
