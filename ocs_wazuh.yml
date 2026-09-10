@@ -858,4 +858,3 @@
           - "WAZUH_PORT={{ wazuh_manager_port }}"
           - "WAZUH_PROTOCOL={{ wazuh_manager_protocol }}"
           - "ESTADO_WAZUH={{ wazuh_estado.stdout }}"
-``
