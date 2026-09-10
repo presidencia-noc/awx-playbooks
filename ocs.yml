@@ -1,0 +1,300 @@
+---
+- name: Instalar y configurar OCS Inventory Agent
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    ocs_url: "https://inventariolinux.presidencia.gob.ar/ocsinventory"
+    ocs_config_path: "/etc/ocsinventory/ocsinventory-agent.cfg"
+    ocs_cert_dir: "/var/lib/ocsinventory-agent/https:__inventariolinux.presidencia.gob.ar_ocsinventory"
+    ocs_cert_path: "{{ ocs_cert_dir }}/cacert.pem"
+
+  tasks:
+
+    ##########################################################################
+    # HOST
+    ##########################################################################
+
+    - name: Mostrar host
+      debug:
+        msg: "Procesando {{ inventory_hostname }}"
+
+    ##########################################################################
+    # VALIDACION SISTEMA
+    ##########################################################################
+
+    - name: Verificar dpkg
+      stat:
+        path: /usr/bin/dpkg
+      register: dpkg_bin
+
+    - name: Fallar si no es Debian/Ubuntu
+      fail:
+        msg: "El host {{ inventory_hostname }} no utiliza dpkg."
+      when: not dpkg_bin.stat.exists
+
+    ##########################################################################
+    # APT PROXY
+    ##########################################################################
+
+    - name: Verificar si existe 00aptproxy
+      stat:
+        path: /etc/apt/apt.conf.d/00aptproxy
+      register: aptproxy
+
+    - name: Comentar lineas activas de 00aptproxy
+      replace:
+        path: /etc/apt/apt.conf.d/00aptproxy
+        regexp: '^(\s*)(?!#)(.*)$'
+        replace: '\1# \2'
+        backup: true
+      when: aptproxy.stat.exists
+
+    - name: Mostrar contenido de 00aptproxy
+      command: cat /etc/apt/apt.conf.d/00aptproxy
+      register: aptproxy_content
+      changed_when: false
+      when: aptproxy.stat.exists
+
+    - name: Mostrar proxy final
+      debug:
+        var: aptproxy_content.stdout_lines
+      when: aptproxy.stat.exists
+
+    ##########################################################################
+    # LIBERACION SEGURA DE APT
+    ##########################################################################
+
+    - name: Detener unattended-upgrades
+      service:
+        name: unattended-upgrades
+        state: stopped
+      failed_when: false
+
+    - name: Detener apt-daily
+      systemd:
+        name: apt-daily.service
+        state: stopped
+      failed_when: false
+
+    - name: Detener apt-daily-upgrade
+      systemd:
+        name: apt-daily-upgrade.service
+        state: stopped
+      failed_when: false
+
+    - name: Detener timers apt
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - apt-daily.timer
+        - apt-daily-upgrade.timer
+      failed_when: false
+
+    - name: Esperar liberacion de locks
+      shell: |
+        timeout=120
+
+        while [ "$timeout" -gt 0 ]; do
+          if ! fuser /var/lib/dpkg/lock >/dev/null 2>&1 && \
+             ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
+             ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1 && \
+             ! fuser /var/cache/apt/archives/lock >/dev/null 2>&1; then
+             exit 0
+          fi
+
+          sleep 5
+          timeout=$((timeout-5))
+        done
+
+        exit 1
+      args:
+        executable: /bin/bash
+      register: apt_wait
+      changed_when: false
+      failed_when: false
+
+    - name: Mostrar resultado espera apt
+      debug:
+        msg: "APT_WAIT_RC={{ apt_wait.rc }}"
+
+    - name: Eliminar locks residuales
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/dpkg/lock
+        - /var/lib/dpkg/lock-frontend
+        - /var/lib/apt/lists/lock
+        - /var/cache/apt/archives/lock
+
+    - name: Reconfigurar paquetes pendientes
+      shell: |
+        timeout 600 dpkg --configure -a
+      register: dpkg_configure
+      failed_when: false
+      changed_when: false
+
+    - name: Mostrar resultado dpkg
+      debug:
+        var: dpkg_configure.stdout_lines
+
+    - name: Reparar dependencias
+      shell: |
+        timeout 900 apt-get -y -f install
+      register: apt_repair
+      failed_when: false
+      changed_when: false
+
+    - name: Mostrar resultado apt
+      debug:
+        var: apt_repair.stdout_lines
+
+    ##########################################################################
+    # DEPENDENCIAS
+    ##########################################################################
+
+    - name: Actualizar cache apt
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Instalar dependencias
+      apt:
+        name:
+          - openssl
+          - psmisc
+          - python3
+          - ca-certificates
+        state: present
+
+    ##########################################################################
+    # OCS INVENTORY
+    ##########################################################################
+
+    - name: Detectar version OCS
+      shell: |
+        dpkg-query -W -f='${Version}' ocsinventory-agent 2>/dev/null || echo NOINSTALADO
+      args:
+        executable: /bin/bash
+      register: ocs_version_initial
+      changed_when: false
+
+    - name: Mostrar version inicial OCS
+      debug:
+        msg: "OCS inicial={{ ocs_version_initial.stdout }}"
+
+    - name: Instalar o actualizar OCS
+      apt:
+        name: ocsinventory-agent
+        state: latest
+
+    - name: Verificar configuracion OCS
+      stat:
+        path: "{{ ocs_config_path }}"
+      register: ocs_cfg
+
+    - name: Fallar si no existe cfg
+      fail:
+        msg: "No existe {{ ocs_config_path }}"
+      when: not ocs_cfg.stat.exists
+
+    - name: Eliminar configuraciones server antiguas
+      lineinfile:
+        path: "{{ ocs_config_path }}"
+        regexp: '^\s*server\s*='
+        state: absent
+
+    - name: Eliminar configuraciones local
+      lineinfile:
+        path: "{{ ocs_config_path }}"
+        regexp: '^\s*local\s*='
+        state: absent
+
+    - name: Configurar servidor HTTPS
+      lineinfile:
+        path: "{{ ocs_config_path }}"
+        line: "server={{ ocs_url }}"
+        insertafter: EOF
+        state: present
+
+    - name: Crear directorio SSL OCS
+      file:
+        path: "{{ ocs_cert_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Descargar certificado
+      shell: |
+        set -o pipefail
+
+        openssl s_client \
+          -connect inventariolinux.presidencia.gob.ar:443 \
+          -servername inventariolinux.presidencia.gob.ar \
+          -showcerts </dev/null 2>/dev/null \
+          | awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' \
+          > "{{ ocs_cert_path }}"
+      args:
+        executable: /bin/bash
+
+    - name: Validar certificado
+      command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ ocs_cert_path }}"
+          - -noout
+          - -subject
+      register: cert_check
+      changed_when: false
+
+    - name: Mostrar certificado
+      debug:
+        var: cert_check.stdout_lines
+
+    - name: Mostrar configuracion OCS
+      shell: |
+        grep -E '^\s*(server|local)\s*=' "{{ ocs_config_path }}" || true
+      args:
+        executable: /bin/bash
+      register: ocs_cfg_final
+      changed_when: false
+
+    - name: Mostrar configuracion final
+      debug:
+        var: ocs_cfg_final.stdout_lines
+
+    - name: Ejecutar OCS Inventory
+      command:
+        argv:
+          - ocsinventory-agent
+          - --debug
+      register: ocs_result
+      failed_when: false
+      changed_when: false
+
+    - name: Detectar version final OCS
+      shell: |
+        dpkg-query -W -f='${Version}' ocsinventory-agent 2>/dev/null || echo NOINSTALADO
+      args:
+        executable: /bin/bash
+      register: ocs_version_final
+      changed_when: false
+
+    ##########################################################################
+    # RESUMEN
+    ##########################################################################
+
+    - name: Mostrar resumen
+      debug:
+        msg:
+          - "HOST={{ inventory_hostname }}"
+          - "OCS_INICIAL={{ ocs_version_initial.stdout }}"
+          - "OCS_FINAL={{ ocs_version_final.stdout }}"
+          - "OCS_RC={{ ocs_result.rc }}"
+          - "SERVIDOR_OCS={{ ocs_url }}"
