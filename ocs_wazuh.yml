@@ -21,20 +21,31 @@
       debug:
         msg: "Procesando {{ inventory_hostname }}"
 
-    ##########################################################################
-    # APT PROXY
-    ##########################################################################
+##############################################################################
+# APT PROXY
+##############################################################################
 
     - name: Verificar si existe 00aptproxy
       stat:
         path: /etc/apt/apt.conf.d/00aptproxy
       register: aptproxy
 
-    - name: Comentar proxy APT antiguo
+    - name: Comentar todas las lineas activas de 00aptproxy
       replace:
         path: /etc/apt/apt.conf.d/00aptproxy
-        regexp: '^Acquire::http::Proxy "http://apt-cache\.presidencia\.local:3142";'
-        replace: '# Acquire::http::Proxy "http://apt-cache.presidencia.local:3142";'
+        regexp: '^(?!#)(.*)$'
+        replace: '# \1'
+      when: aptproxy.stat.exists
+
+    - name: Mostrar configuracion final del proxy
+      command: cat /etc/apt/apt.conf.d/00aptproxy
+      register: aptproxy_content
+      changed_when: false
+      when: aptproxy.stat.exists
+
+    - name: Mostrar contenido del proxy
+      debug:
+        var: aptproxy_content.stdout_lines
       when: aptproxy.stat.exists
 
     ##########################################################################
