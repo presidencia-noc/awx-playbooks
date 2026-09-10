@@ -266,4 +266,3 @@
           - "OCS={{ ocs_version.stdout }}"
           - "WAZUH={{ wazuh_version.stdout }}"
           - "ESTADO_WAZUH={{ wazuh_estado.stdout }}"
-`
