@@ -13,17 +13,17 @@
 
   tasks:
 
-##############################################################################
-# INFORMACION DEL HOST
-##############################################################################
+    ##########################################################################
+    # HOST
+    ##########################################################################
 
     - name: Mostrar host
       debug:
         msg: "Procesando {{ inventory_hostname }}"
 
-##############################################################################
-# APT PROXY
-##############################################################################
+    ##########################################################################
+    # APT PROXY
+    ##########################################################################
 
     - name: Verificar si existe 00aptproxy
       stat:
@@ -37,87 +37,87 @@
         replace: '# Acquire::http::Proxy "http://apt-cache.presidencia.local:3142";'
       when: aptproxy.stat.exists
 
-##############################################################################
-# MANEJO INTELIGENTE DE APT BLOQUEADO
-##############################################################################
+    ##########################################################################
+    # MANEJO APT BLOQUEADO
+    ##########################################################################
 
-- name: Detener unattended-upgrades
-  service:
-    name: unattended-upgrades
-    state: stopped
-  failed_when: false
+    - name: Detener unattended-upgrades
+      service:
+        name: unattended-upgrades
+        state: stopped
+      failed_when: false
 
-- name: Esperar 60 segundos a que apt libere locks
-  shell: |
-    timeout=60
+    - name: Esperar liberacion de apt
+      shell: |
+        timeout=60
 
-    while [ $timeout -gt 0 ]; do
-      if ! fuser /var/lib/dpkg/lock >/dev/null 2>&1 && \
-         ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
-         ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1 && \
-         ! fuser /var/cache/apt/archives/lock >/dev/null 2>&1; then
-         exit 0
-      fi
+        while [ $timeout -gt 0 ]; do
+          if ! fuser /var/lib/dpkg/lock >/dev/null 2>&1 && \
+             ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
+             ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1 && \
+             ! fuser /var/cache/apt/archives/lock >/dev/null 2>&1; then
+             exit 0
+          fi
 
-      sleep 5
-      timeout=$((timeout-5))
-    done
+          sleep 5
+          timeout=$((timeout-5))
+        done
 
-    exit 1
-  register: apt_wait
-  failed_when: false
-  changed_when: false
+        exit 1
+      register: apt_wait
+      failed_when: false
+      changed_when: false
 
-- name: Buscar proceso que mantiene lock
-  shell: |
-    (
-      fuser /var/lib/dpkg/lock 2>/dev/null
-      fuser /var/lib/dpkg/lock-frontend 2>/dev/null
-      fuser /var/lib/apt/lists/lock 2>/dev/null
-      fuser /var/cache/apt/archives/lock 2>/dev/null
-    ) | tr ' ' '\n' | sort -u | grep -E '^[0-9]+$' || true
-  register: apt_lock_pids
-  changed_when: false
-  when: apt_wait.rc != 0
+    - name: Buscar procesos bloqueando apt
+      shell: |
+        (
+          fuser /var/lib/dpkg/lock 2>/dev/null
+          fuser /var/lib/dpkg/lock-frontend 2>/dev/null
+          fuser /var/lib/apt/lists/lock 2>/dev/null
+          fuser /var/cache/apt/archives/lock 2>/dev/null
+        ) | tr ' ' '\n' | sort -u | grep -E '^[0-9]+$' || true
+      register: apt_lock_pids
+      changed_when: false
+      when: apt_wait.rc != 0
 
-- name: Mostrar PID bloqueante
-  debug:
-    msg: "PID bloqueando APT: {{ apt_lock_pids.stdout_lines }}"
-  when: apt_wait.rc != 0
+    - name: Mostrar procesos bloqueando apt
+      debug:
+        var: apt_lock_pids.stdout_lines
+      when: apt_wait.rc != 0
 
-- name: Finalizar proceso bloqueante
-  shell: |
-    for pid in {{ apt_lock_pids.stdout_lines | join(' ') }}; do
-      kill -9 "$pid" || true
-    done
-  when:
-    - apt_wait.rc != 0
-    - apt_lock_pids.stdout != ""
-  failed_when: false
+    - name: Finalizar procesos bloqueantes
+      shell: |
+        for pid in {{ apt_lock_pids.stdout_lines | join(' ') }}; do
+          kill -9 "$pid" || true
+        done
+      when:
+        - apt_wait.rc != 0
+        - apt_lock_pids.stdout != ""
+      failed_when: false
 
-- name: Eliminar locks residuales
-  file:
-    path: "{{ item }}"
-    state: absent
-  loop:
-    - /var/lib/dpkg/lock
-    - /var/lib/dpkg/lock-frontend
-    - /var/lib/apt/lists/lock
-    - /var/cache/apt/archives/lock
+    - name: Eliminar locks residuales
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/dpkg/lock
+        - /var/lib/dpkg/lock-frontend
+        - /var/lib/apt/lists/lock
+        - /var/cache/apt/archives/lock
 
-- name: Reconfigurar paquetes pendientes
-  command: dpkg --configure -a
-  failed_when: false
+    - name: Reconfigurar paquetes
+      command: dpkg --configure -a
+      failed_when: false
 
-- name: Reparar dependencias
-  command: apt-get -f install -y
-  failed_when: false
+    - name: Reparar dependencias
+      command: apt-get -f install -y
+      failed_when: false
 
-##############################################################################
-# OCS INVENTORY
-##############################################################################
+    ##########################################################################
+    # OCS
+    ##########################################################################
 
-    - name: Verificar version instalada de OCS
+    - name: Detectar version OCS
       shell: |
         dpkg-query -W -f='${Version}' ocsinventory-agent 2>/dev/null || echo NOINSTALADO
       register: ocs_version
@@ -125,7 +125,7 @@
 
     - name: Mostrar version OCS
       debug:
-        msg: "Version OCS: {{ ocs_version.stdout }}"
+        msg: "OCS={{ ocs_version.stdout }}"
 
     - name: Instalar o actualizar OCS
       apt:
@@ -133,26 +133,26 @@
         state: latest
         update_cache: yes
 
-    - name: Verificar archivo de configuracion OCS
+    - name: Verificar configuracion OCS
       stat:
         path: /etc/ocsinventory/ocsinventory-agent.cfg
       register: ocs_cfg
 
-    - name: Corregir URL HTTP por HTTPS
+    - name: Corregir server HTTP
       replace:
         path: /etc/ocsinventory/ocsinventory-agent.cfg
         regexp: '^server=http://inventariolinux\.presidencia\.gob\.ar/ocsinventory'
         replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
       when: ocs_cfg.stat.exists
 
-    - name: Corregir configuracion local incorrecta
+    - name: Corregir modo local
       replace:
         path: /etc/ocsinventory/ocsinventory-agent.cfg
         regexp: '^local=/var/lib/ocsinventory-agent/reports'
         replace: 'server=https://inventariolinux.presidencia.gob.ar/ocsinventory'
       when: ocs_cfg.stat.exists
 
-    - name: Crear directorio SSL OCS
+    - name: Crear directorio certificado OCS
       file:
         path: "{{ ocs_cert_dir }}"
         state: directory
@@ -170,15 +170,18 @@
           -servername inventariolinux.presidencia.gob.ar \
           -showcerts </dev/null 2>/dev/null \
           | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/' \
-          > {{ ocs_cert_dir }}/cacert.pem
+          > "{{ ocs_cert_dir }}/cacert.pem"
       args:
         executable: /bin/bash
 
-    - name: Validar certificado descargado
-      command: >
-        openssl x509
-        -in {{ ocs_cert_dir }}/cacert.pem
-        -noout
+    - name: Validar certificado
+      command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ ocs_cert_dir }}/cacert.pem"
+          - -noout
       register: cert_check
       failed_when: false
       changed_when: false
@@ -187,9 +190,8 @@
       debug:
         var: cert_check.rc
 
-    - name: Mostrar configuracion final OCS
-      shell: |
-        grep -E 'server=|local=' /etc/ocsinventory/ocsinventory-agent.cfg
+    - name: Mostrar configuracion OCS
+      shell: grep -E 'server=|local=' /etc/ocsinventory/ocsinventory-agent.cfg
       register: ocs_cfg_final
       failed_when: false
       changed_when: false
@@ -202,11 +204,11 @@
       register: ocs_result
       failed_when: false
 
-##############################################################################
-# WAZUH
-##############################################################################
+    ##########################################################################
+    # WAZUH
+    ##########################################################################
 
-    - name: Detectar version instalada de Wazuh
+    - name: Detectar version Wazuh
       shell: |
         dpkg-query -W -f='${Version}' wazuh-agent 2>/dev/null || echo NOINSTALADO
       register: wazuh_version
@@ -214,14 +216,15 @@
 
     - name: Mostrar version Wazuh
       debug:
-        msg: "Version Wazuh: {{ wazuh_version.stdout }}"
+        msg: "Wazuh={{ wazuh_version.stdout }}"
 
-    - name: Descargar Wazuh 4.14.7
+    - name: Descargar Wazuh
       get_url:
         url: "{{ wazuh_deb_url }}"
         dest: /tmp/wazuh-agent_4.14.7-1_amd64.deb
       when: >
-        wazuh_version.stdout == "NOINSTALADO" or
+        wazuh_version.stdout == "NOINSTALADO"
+        or
         wazuh_version_objetivo not in wazuh_version.stdout
 
     - name: Instalar o actualizar Wazuh
@@ -229,7 +232,8 @@
         WAZUH_MANAGER='172.21.205.100' \
         dpkg -i /tmp/wazuh-agent_4.14.7-1_amd64.deb
       when: >
-        wazuh_version.stdout == "NOINSTALADO" or
+        wazuh_version.stdout == "NOINSTALADO"
+        or
         wazuh_version_objetivo not in wazuh_version.stdout
 
     - name: Recargar systemd
@@ -252,13 +256,14 @@
       changed_when: false
       failed_when: false
 
-##############################################################################
-# RESUMEN FINAL
-##############################################################################
+    ##########################################################################
+    # RESUMEN
+    ##########################################################################
 
     - name: Mostrar resumen
       debug:
         msg:
-          - "OCS: {{ ocs_version.stdout }}"
-          - "Wazuh: {{ wazuh_version.stdout }}"
-          - "Estado Wazuh: {{ wazuh_estado.stdout }}"
+          - "OCS={{ ocs_version.stdout }}"
+          - "WAZUH={{ wazuh_version.stdout }}"
+          - "ESTADO_WAZUH={{ wazuh_estado.stdout }}"
+`
