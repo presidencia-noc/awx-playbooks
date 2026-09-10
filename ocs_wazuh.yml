@@ -282,28 +282,27 @@
         - /var/lib/apt/lists/lock
         - /var/cache/apt/archives/lock
 
-    - name: Reconfigurar paquetes pendientes
-      ansible.builtin.command:
-        argv:
-          - dpkg
-          - --configure
-          - -a
+      - name: Reconfigurar paquetes pendientes
+      shell: |
+        timeout 600 dpkg --configure -a
       register: dpkg_configure
-      changed_when: dpkg_configure.rc == 0
       failed_when: false
+      changed_when: false
 
-    - name: Reparar dependencias pendientes
-      ansible.builtin.command:
-        argv:
-          - apt-get
-          - -f
-          - install
-          - -y
+    - name: Mostrar resultado dpkg
+      debug:
+        var: dpkg_configure.stdout_lines
+
+    - name: Reparar dependencias
+      shell: |
+        timeout 900 apt-get -y -f install
       register: apt_repair
-      changed_when: >-
-        '0 upgraded, 0 newly installed, 0 to remove' not in apt_repair.stdout
       failed_when: false
+      changed_when: false
 
+    - name: Mostrar resultado apt
+      debug:
+        var: apt_repair.stdout_lines
     ##########################################################################
     # PAQUETES NECESARIOS
     ##########################################################################
