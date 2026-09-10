@@ -38,48 +38,80 @@
       when: aptproxy.stat.exists
 
 ##############################################################################
-# MANEJO SEGURO DE APT BLOQUEADO
+# MANEJO INTELIGENTE DE APT BLOQUEADO
 ##############################################################################
 
-    - name: Detener unattended-upgrades
-      service:
-        name: unattended-upgrades
-        state: stopped
-      failed_when: false
+- name: Detener unattended-upgrades
+  service:
+    name: unattended-upgrades
+    state: stopped
+  failed_when: false
 
-    - name: Esperar liberacion de locks apt
-      shell: |
-        timeout=300
-        while [ $timeout -gt 0 ]; do
-          if ! fuser /var/lib/dpkg/lock >/dev/null 2>&1 && \
-             ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
-             ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1 && \
-             ! fuser /var/cache/apt/archives/lock >/dev/null 2>&1; then
-              exit 0
-          fi
+- name: Esperar 60 segundos a que apt libere locks
+  shell: |
+    timeout=60
 
-          sleep 5
-          timeout=$((timeout-5))
-        done
+    while [ $timeout -gt 0 ]; do
+      if ! fuser /var/lib/dpkg/lock >/dev/null 2>&1 && \
+         ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
+         ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1 && \
+         ! fuser /var/cache/apt/archives/lock >/dev/null 2>&1; then
+         exit 0
+      fi
 
-        exit 1
-      register: apt_wait
-      changed_when: false
-      failed_when: false
+      sleep 5
+      timeout=$((timeout-5))
+    done
 
-    - name: Mostrar estado de apt
-      debug:
-        var: apt_wait.rc
+    exit 1
+  register: apt_wait
+  failed_when: false
+  changed_when: false
 
-    - name: Reconfigurar paquetes pendientes
-      command: dpkg --configure -a
-      failed_when: false
-      changed_when: false
+- name: Buscar proceso que mantiene lock
+  shell: |
+    (
+      fuser /var/lib/dpkg/lock 2>/dev/null
+      fuser /var/lib/dpkg/lock-frontend 2>/dev/null
+      fuser /var/lib/apt/lists/lock 2>/dev/null
+      fuser /var/cache/apt/archives/lock 2>/dev/null
+    ) | tr ' ' '\n' | sort -u | grep -E '^[0-9]+$' || true
+  register: apt_lock_pids
+  changed_when: false
+  when: apt_wait.rc != 0
 
-    - name: Reparar dependencias rotas
-      command: apt-get -f install -y
-      failed_when: false
-      changed_when: false
+- name: Mostrar PID bloqueante
+  debug:
+    msg: "PID bloqueando APT: {{ apt_lock_pids.stdout_lines }}"
+  when: apt_wait.rc != 0
+
+- name: Finalizar proceso bloqueante
+  shell: |
+    for pid in {{ apt_lock_pids.stdout_lines | join(' ') }}; do
+      kill -9 "$pid" || true
+    done
+  when:
+    - apt_wait.rc != 0
+    - apt_lock_pids.stdout != ""
+  failed_when: false
+
+- name: Eliminar locks residuales
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/lib/dpkg/lock
+    - /var/lib/dpkg/lock-frontend
+    - /var/lib/apt/lists/lock
+    - /var/cache/apt/archives/lock
+
+- name: Reconfigurar paquetes pendientes
+  command: dpkg --configure -a
+  failed_when: false
+
+- name: Reparar dependencias
+  command: apt-get -f install -y
+  failed_when: false
 
 ##############################################################################
 # OCS INVENTORY
