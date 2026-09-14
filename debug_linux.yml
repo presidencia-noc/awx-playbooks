@@ -4,23 +4,16 @@
 
   tasks:
 
-    - name: Ver usuario
+    - name: Usuario
       raw: whoami
       register: usuario
 
     - debug:
         var: usuario.stdout
 
-    - name: Ver Python
-      raw: python3 --version || python --version
+    - name: Python
+      raw: /usr/bin/python3 --version
       register: py
 
     - debug:
         var: py.stdout
-
-    - name: Ver PATH
-      raw: echo $PATH
-      register: path
-
-    - debug:
-        var: path.stdout
