@@ -1,0 +1,537 @@
+---
+# ============================================================
+# Diagnóstico de gestión AWX / Ansible para equipos Ubuntu
+#
+# Compatible conceptualmente con Ubuntu 16.04 a 26.04.
+#
+# No realiza cambios en los equipos.
+# Solamente prueba:
+#   - Resolución del destino
+#   - Conectividad TCP al puerto SSH
+#   - Autenticación SSH mediante Ansible
+#   - Disponibilidad de shell
+#   - Disponibilidad de Python
+#   - Acceso sudo no interactivo
+#   - Versión de Ubuntu
+#
+# Ejecutar contra el inventario o grupo deseado desde AWX.
+# ============================================================
+
+- name: "Etapa 1 | Diagnóstico de red desde AWX"
+  hosts: all
+  gather_facts: false
+  strategy: free
+
+  vars:
+    diagnostic_target: "{{ ansible_host | default(inventory_hostname) }}"
+    diagnostic_port: "{{ ansible_port | default(22) | int }}"
+    diagnostic_timeout: 8
+
+  tasks:
+
+    - name: "Inicializar datos del diagnóstico"
+      ansible.builtin.set_fact:
+        diag_destino: "{{ diagnostic_target }}"
+        diag_puerto: "{{ diagnostic_port }}"
+        diag_dns_ok: false
+        diag_tcp_ok: false
+        diag_ssh_ok: false
+        diag_shell_ok: false
+        diag_python_ok: false
+        diag_sudo_ok: false
+        diag_estado: "PENDIENTE"
+        diag_motivo: "Diagnóstico no finalizado"
+        diag_ip_resuelta: ""
+        diag_os: "DESCONOCIDO"
+        diag_version: "DESCONOCIDA"
+        diag_kernel: "DESCONOCIDO"
+        diag_python: "NO DISPONIBLE"
+        diag_usuario_remoto: "{{ ansible_user | default('NO DEFINIDO') }}"
+
+    # --------------------------------------------------------
+    # Resolución del destino desde el Execution Environment
+    # --------------------------------------------------------
+
+    - name: "Comprobar si el destino se puede resolver"
+      ansible.builtin.command:
+        argv:
+          - getent
+          - ahosts
+          - "{{ diagnostic_target }}"
+      delegate_to: localhost
+      changed_when: false
+      failed_when: false
+      register: diag_getent
+
+    - name: "Guardar resultado de resolución"
+      ansible.builtin.set_fact:
+        diag_dns_ok: "{{ diag_getent.rc == 0 }}"
+        diag_ip_resuelta: >-
+          {{
+            (
+              diag_getent.stdout_lines[0].split()[0]
+              if (
+                diag_getent.rc == 0
+                and diag_getent.stdout_lines is defined
+                and diag_getent.stdout_lines | length > 0
+              )
+              else ''
+            )
+          }}
+
+    # --------------------------------------------------------
+    # Prueba del puerto SSH desde AWX
+    # --------------------------------------------------------
+
+    - name: "Comprobar acceso al puerto SSH"
+      ansible.builtin.wait_for:
+        host: "{{ diagnostic_target }}"
+        port: "{{ diagnostic_port }}"
+        state: started
+        connect_timeout: 3
+        timeout: "{{ diagnostic_timeout }}"
+      delegate_to: localhost
+      changed_when: false
+      failed_when: false
+      register: diag_tcp
+      when: diag_dns_ok | bool
+
+    - name: "Guardar resultado de la prueba TCP"
+      ansible.builtin.set_fact:
+        diag_tcp_ok: >-
+          {{
+            diag_dns_ok | bool
+            and diag_tcp is defined
+            and not (diag_tcp.failed | default(false))
+          }}
+
+    # --------------------------------------------------------
+    # Clasificación preliminar
+    # --------------------------------------------------------
+
+    - name: "Clasificar fallo de resolución"
+      ansible.builtin.set_fact:
+        diag_estado: "SIN_GESTION"
+        diag_motivo: "El nombre o dirección configurado en AWX no puede resolverse desde el Execution Environment"
+      when: not (diag_dns_ok | bool)
+
+    - name: "Clasificar fallo de red o puerto SSH"
+      ansible.builtin.set_fact:
+        diag_estado: "SIN_GESTION"
+        diag_motivo: >-
+          El destino resuelve como {{ diag_ip_resuelta | default('sin IP') }},
+          pero el puerto TCP {{ diagnostic_port }} no responde desde AWX.
+          Revisar red, VLAN, DMZ, firewall, routing, equipo apagado,
+          servicio ssh/sshd o puerto SSH diferente.
+      when:
+        - diag_dns_ok | bool
+        - not (diag_tcp_ok | bool)
+
+    # --------------------------------------------------------
+    # Resultado preliminar por equipo
+    # --------------------------------------------------------
+
+    - name: "Mostrar diagnóstico preliminar de red"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "Equipo de inventario : {{ inventory_hostname }}"
+          - "Destino utilizado     : {{ diagnostic_target }}"
+          - "IP resuelta           : {{ diag_ip_resuelta | default('NO RESUELVE') }}"
+          - "Puerto SSH            : {{ diagnostic_port }}"
+          - "Resolución correcta   : {{ diag_dns_ok }}"
+          - "Puerto accesible      : {{ diag_tcp_ok }}"
+          - "Estado preliminar     : {{ diag_estado }}"
+          - "Motivo preliminar     : {{ diag_motivo }}"
+          - "============================================================"
+
+
+- name: "Etapa 2 | Diagnóstico SSH, Python y sudo"
+  hosts: all
+  gather_facts: false
+  strategy: free
+
+  vars:
+    diagnostic_target: "{{ ansible_host | default(inventory_hostname) }}"
+    diagnostic_port: "{{ ansible_port | default(22) | int }}"
+    ansible_command_timeout: 20
+
+  tasks:
+
+    # --------------------------------------------------------
+    # Probar el acceso mediante el transporte real de Ansible
+    # --------------------------------------------------------
+
+    - name: "Comprobar conexión completa de Ansible"
+      ansible.builtin.wait_for_connection:
+        connect_timeout: 5
+        sleep: 1
+        timeout: 15
+      register: diag_ansible_connection
+      ignore_errors: true
+      ignore_unreachable: true
+      when:
+        - diag_dns_ok | default(false) | bool
+        - diag_tcp_ok | default(false) | bool
+
+    - name: "Restablecer hosts marcados como inaccesibles"
+      ansible.builtin.meta: clear_host_errors
+
+    - name: "Guardar resultado de conexión de Ansible"
+      ansible.builtin.set_fact:
+        diag_ssh_ok: >-
+          {{
+            diag_ansible_connection is defined
+            and not (diag_ansible_connection.failed | default(false))
+            and not (diag_ansible_connection.unreachable | default(false))
+            and diag_ansible_connection.msg | default('') != 'Conditional result was False'
+          }}
+      when:
+        - diag_dns_ok | default(false) | bool
+        - diag_tcp_ok | default(false) | bool
+
+    - name: "Guardar mensaje completo del error SSH"
+      ansible.builtin.set_fact:
+        diag_error_ssh: >-
+          {{
+            diag_ansible_connection.msg
+            | default(
+                diag_ansible_connection.exception
+                | default('No se recibió un mensaje detallado de Ansible')
+              )
+          }}
+      when:
+        - diag_dns_ok | default(false) | bool
+        - diag_tcp_ok | default(false) | bool
+        - not (diag_ssh_ok | default(false) | bool)
+
+    # --------------------------------------------------------
+    # Clasificar errores habituales de conexión
+    # --------------------------------------------------------
+
+    - name: "Clasificar autenticación rechazada"
+      ansible.builtin.set_fact:
+        diag_estado: "SIN_GESTION"
+        diag_motivo: >-
+          El puerto SSH responde, pero la autenticación fue rechazada.
+          Verificar ansible_user, la credencial asignada al Job Template,
+          authorized_keys, permisos de .ssh y que la clave pública corresponda
+          con la clave privada configurada en AWX.
+      when:
+        - diag_tcp_ok | default(false) | bool
+        - not (diag_ssh_ok | default(false) | bool)
+        - >
+          'permission denied' in (diag_error_ssh | default('') | lower)
+          or 'authentication failed' in (diag_error_ssh | default('') | lower)
+          or 'publickey' in (diag_error_ssh | default('') | lower)
+
+    - name: "Clasificar error de host key"
+      ansible.builtin.set_fact:
+        diag_estado: "SIN_GESTION"
+        diag_motivo: >-
+          La identidad SSH del equipo no coincide o no fue aceptada.
+          Puede haber cambiado la clave del host, haberse reutilizado la IP
+          o existir una entrada anterior en known_hosts del Execution Environment.
+          Validar la huella antes de eliminar o reemplazar la entrada.
+      when:
+        - diag_tcp_ok | default(false) | bool
+        - not (diag_ssh_ok | default(false) | bool)
+        - >
+          'host key verification failed' in (diag_error_ssh | default('') | lower)
+          or 'remote host identification has changed' in (diag_error_ssh | default('') | lower)
+          or 'offending' in (diag_error_ssh | default('') | lower)
+
+    - name: "Clasificar timeout SSH"
+      ansible.builtin.set_fact:
+        diag_estado: "SIN_GESTION"
+        diag_motivo: >-
+          El puerto fue detectado, pero la negociación SSH agotó el tiempo.
+          Revisar firewall con inspección, saturación del equipo,
+          MaxStartups de sshd, bloqueo por fail2ban, routing asimétrico
+          o problemas de MTU.
+      when:
+        - diag_tcp_ok | default(false) | bool
+        - not (diag_ssh_ok | default(false) | bool)
+        - >
+          'timed out' in (diag_error_ssh | default('') | lower)
+          or 'timeout' in (diag_error_ssh | default('') | lower)
+
+    - name: "Clasificar conexión rechazada"
+      ansible.builtin.set_fact:
+        diag_estado: "SIN_GESTION"
+        diag_motivo: >-
+          La conexión SSH fue rechazada. El equipo contesta por red,
+          pero ssh/sshd podría estar detenido, escuchando en otra interfaz
+          o limitado mediante firewall o configuración de ListenAddress.
+      when:
+        - diag_tcp_ok | default(false) | bool
+        - not (diag_ssh_ok | default(false) | bool)
+        - "'connection refused' in (diag_error_ssh | default('') | lower)"
+
+    - name: "Clasificar usuario inexistente o no permitido"
+      ansible.builtin.set_fact:
+        diag_estado: "SIN_GESTION"
+        diag_motivo: >-
+          El usuario configurado no existe, está bloqueado,
+          tiene un shell no interactivo o no está permitido por sshd.
+          Revisar ansible_user, AllowUsers, AllowGroups, DenyUsers,
+          estado de la cuenta y shell asignado.
+      when:
+        - diag_tcp_ok | default(false) | bool
+        - not (diag_ssh_ok | default(false) | bool)
+        - >
+          'invalid user' in (diag_error_ssh | default('') | lower)
+          or 'account is locked' in (diag_error_ssh | default('') | lower)
+          or 'not allowed' in (diag_error_ssh | default('') | lower)
+
+    - name: "Clasificar algoritmo SSH incompatible"
+      ansible.builtin.set_fact:
+        diag_estado: "SIN_GESTION"
+        diag_motivo: >-
+          No existe un algoritmo SSH compatible entre AWX y el equipo.
+          Es frecuente en sistemas antiguos. Revisar host key algorithms,
+          key exchange algorithms y tipos de clave admitidos.
+          No habilitar algoritmos obsoletos globalmente sin evaluar el riesgo.
+      when:
+        - diag_tcp_ok | default(false) | bool
+        - not (diag_ssh_ok | default(false) | bool)
+        - >
+          'no matching' in (diag_error_ssh | default('') | lower)
+          or 'unable to negotiate' in (diag_error_ssh | default('') | lower)
+
+    - name: "Clasificar error SSH no identificado"
+      ansible.builtin.set_fact:
+        diag_estado: "SIN_GESTION"
+        diag_motivo: >-
+          El puerto SSH responde, pero Ansible no pudo completar la conexión.
+          Revisar el mensaje técnico incluido en el reporte.
+      when:
+        - diag_tcp_ok | default(false) | bool
+        - not (diag_ssh_ok | default(false) | bool)
+        - diag_estado | default('PENDIENTE') == 'PENDIENTE'
+
+    # --------------------------------------------------------
+    # Diagnóstico sin depender inicialmente de Python
+    # --------------------------------------------------------
+
+    - name: "Comprobar shell remoto mediante raw"
+      ansible.builtin.raw: "printf 'AWX_SHELL_OK\\n'"
+      register: diag_raw_shell
+      changed_when: false
+      failed_when: false
+      ignore_unreachable: true
+      when: diag_ssh_ok | default(false) | bool
+
+    - name: "Restablecer hosts luego de la prueba raw"
+      ansible.builtin.meta: clear_host_errors
+
+    - name: "Guardar disponibilidad del shell"
+      ansible.builtin.set_fact:
+        diag_shell_ok: >-
+          {{
+            diag_raw_shell is defined
+            and diag_raw_shell.rc | default(1) == 0
+            and 'AWX_SHELL_OK' in (diag_raw_shell.stdout | default(''))
+          }}
+      when: diag_ssh_ok | default(false) | bool
+
+    - name: "Obtener identificación del sistema operativo"
+      ansible.builtin.raw: |
+        if [ -r /etc/os-release ]; then
+          . /etc/os-release
+          printf '%s|%s\n' "${NAME:-Linux}" "${VERSION_ID:-desconocida}"
+        elif command -v lsb_release >/dev/null 2>&1; then
+          printf '%s|%s\n' \
+            "$(lsb_release -si 2>/dev/null)" \
+            "$(lsb_release -sr 2>/dev/null)"
+        else
+          printf 'Linux|desconocida\n'
+        fi
+      register: diag_os_raw
+      changed_when: false
+      failed_when: false
+      when: diag_shell_ok | default(false) | bool
+
+    - name: "Obtener kernel y arquitectura"
+      ansible.builtin.raw: "uname -srmo 2>/dev/null || uname -a"
+      register: diag_kernel_raw
+      changed_when: false
+      failed_when: false
+      when: diag_shell_ok | default(false) | bool
+
+    - name: "Comprobar intérpretes Python disponibles"
+      ansible.builtin.raw: |
+        if command -v python3 >/dev/null 2>&1; then
+          printf 'python3|'
+          python3 --version 2>&1
+        elif command -v python >/dev/null 2>&1; then
+          printf 'python|'
+          python --version 2>&1
+        else
+          printf 'NO_DISPONIBLE|No se encontró python3 ni python\n'
+          exit 10
+        fi
+      register: diag_python_raw
+      changed_when: false
+      failed_when: false
+      when: diag_shell_ok | default(false) | bool
+
+    - name: "Comprobar sudo sin contraseña"
+      ansible.builtin.raw: |
+        if [ "$(id -u)" -eq 0 ]; then
+          printf 'ROOT\n'
+          exit 0
+        fi
+
+        if ! command -v sudo >/dev/null 2>&1; then
+          printf 'SUDO_NO_INSTALADO\n'
+          exit 11
+        fi
+
+        if sudo -n true >/dev/null 2>&1; then
+          printf 'SUDO_OK\n'
+          exit 0
+        fi
+
+        printf 'SUDO_REQUIERE_PASSWORD_O_NO_AUTORIZADO\n'
+        exit 12
+      register: diag_sudo_raw
+      changed_when: false
+      failed_when: false
+      when: diag_shell_ok | default(false) | bool
+
+    # --------------------------------------------------------
+    # Procesamiento de información obtenida
+    # --------------------------------------------------------
+
+    - name: "Guardar versión de sistema operativo"
+      ansible.builtin.set_fact:
+        diag_os: >-
+          {{
+            (
+              diag_os_raw.stdout | default('Linux|desconocida')
+            ).strip().split('|')[0] | default('Linux')
+          }}
+        diag_version: >-
+          {{
+            (
+              diag_os_raw.stdout | default('Linux|desconocida')
+            ).strip().split('|')[1] | default('desconocida')
+          }}
+        diag_kernel: "{{ diag_kernel_raw.stdout | default('DESCONOCIDO') | trim }}"
+        diag_python: "{{ diag_python_raw.stdout | default('NO DISPONIBLE') | trim }}"
+        diag_python_ok: "{{ diag_python_raw.rc | default(1) == 0 }}"
+        diag_sudo_ok: "{{ diag_sudo_raw.rc | default(1) == 0 }}"
+      when: diag_shell_ok | default(false) | bool
+
+    # --------------------------------------------------------
+    # Clasificación final
+    # --------------------------------------------------------
+
+    - name: "Clasificar SSH disponible pero shell inutilizable"
+      ansible.builtin.set_fact:
+        diag_estado: "GESTION_PARCIAL"
+        diag_motivo: >-
+          La autenticación SSH funciona, pero no se pudo ejecutar un shell remoto.
+          Revisar el shell del usuario, ForceCommand, restricciones de sshd
+          y comandos configurados en authorized_keys.
+      when:
+        - diag_ssh_ok | default(false) | bool
+        - not (diag_shell_ok | default(false) | bool)
+
+    - name: "Clasificar equipo sin Python"
+      ansible.builtin.set_fact:
+        diag_estado: "GESTION_PARCIAL"
+        diag_motivo: >-
+          SSH y el shell funcionan, pero no se encontró Python.
+          Los módulos normales de Ansible pueden fallar.
+          Se puede instalar Python mediante raw o incorporar Python
+          durante el procedimiento inicial de enrolamiento.
+      when:
+        - diag_shell_ok | default(false) | bool
+        - not (diag_python_ok | default(false) | bool)
+
+    - name: "Clasificar equipo sin sudo automático"
+      ansible.builtin.set_fact:
+        diag_estado: "GESTION_PARCIAL"
+        diag_motivo: >-
+          SSH, shell y Python funcionan, pero el usuario no puede ejecutar
+          sudo sin interacción. Las tareas sin privilegios funcionarán,
+          pero las que utilicen become pueden fallar.
+      when:
+        - diag_shell_ok | default(false) | bool
+        - diag_python_ok | default(false) | bool
+        - not (diag_sudo_ok | default(false) | bool)
+
+    - name: "Clasificar equipo completamente gestionado"
+      ansible.builtin.set_fact:
+        diag_estado: "GESTIONADO"
+        diag_motivo: >-
+          El equipo responde por red, acepta la autenticación de AWX,
+          permite ejecutar comandos, dispone de Python y permite elevación
+          no interactiva mediante sudo o ya se accede como root.
+      when:
+        - diag_dns_ok | default(false) | bool
+        - diag_tcp_ok | default(false) | bool
+        - diag_ssh_ok | default(false) | bool
+        - diag_shell_ok | default(false) | bool
+        - diag_python_ok | default(false) | bool
+        - diag_sudo_ok | default(false) | bool
+
+    # --------------------------------------------------------
+    # Reporte individual
+    # --------------------------------------------------------
+
+    - name: "Mostrar reporte final del equipo"
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "REPORTE DE GESTIÓN AWX"
+          - "============================================================"
+          - "Inventario        : {{ inventory_hostname }}"
+          - "Destino           : {{ ansible_host | default(inventory_hostname) }}"
+          - "IP resuelta       : {{ diag_ip_resuelta | default('NO RESUELVE') }}"
+          - "Puerto SSH        : {{ ansible_port | default(22) }}"
+          - "Usuario Ansible   : {{ ansible_user | default('NO DEFINIDO') }}"
+          - "------------------------------------------------------------"
+          - "DNS               : {{ 'OK' if diag_dns_ok | default(false) | bool else 'ERROR' }}"
+          - "Puerto TCP        : {{ 'OK' if diag_tcp_ok | default(false) | bool else 'ERROR' }}"
+          - "Autenticación SSH : {{ 'OK' if diag_ssh_ok | default(false) | bool else 'ERROR' }}"
+          - "Shell remoto      : {{ 'OK' if diag_shell_ok | default(false) | bool else 'ERROR' }}"
+          - "Python            : {{ 'OK' if diag_python_ok | default(false) | bool else 'ERROR' }}"
+          - "Sudo              : {{ 'OK' if diag_sudo_ok | default(false) | bool else 'ERROR' }}"
+          - "------------------------------------------------------------"
+          - "Sistema operativo : {{ diag_os | default('DESCONOCIDO') }}"
+          - "Versión           : {{ diag_version | default('DESCONOCIDA') }}"
+          - "Kernel            : {{ diag_kernel | default('DESCONOCIDO') }}"
+          - "Python detectado  : {{ diag_python | default('NO DISPONIBLE') }}"
+          - "------------------------------------------------------------"
+          - "ESTADO FINAL      : {{ diag_estado | default('SIN_DIAGNOSTICO') }}"
+          - "DIAGNÓSTICO       : {{ diag_motivo | default('Sin información') }}"
+          - "------------------------------------------------------------"
+          - "ERROR TÉCNICO SSH : {{ diag_error_ssh | default('Ninguno') }}"
+          - "============================================================"
+
+    # --------------------------------------------------------
+    # Stats de AWX
+    # Quedan disponibles como información del Job.
+    # --------------------------------------------------------
+
+    - name: "Publicar resultado como estadística de AWX"
+      ansible.builtin.set_stats:
+        data:
+          "diagnostico_{{ inventory_hostname | regex_replace('[^A-Za-z0-9_]', '_') }}":
+            equipo: "{{ inventory_hostname }}"
+            destino: "{{ ansible_host | default(inventory_hostname) }}"
+            ip: "{{ diag_ip_resuelta | default('') }}"
+            puerto: "{{ ansible_port | default(22) }}"
+            usuario: "{{ ansible_user | default('NO DEFINIDO') }}"
+            estado: "{{ diag_estado | default('SIN_DIAGNOSTICO') }}"
+            motivo: "{{ diag_motivo | default('Sin información') }}"
+            sistema_operativo: "{{ diag_os | default('DESCONOCIDO') }}"
+            version: "{{ diag_version | default('DESCONOCIDA') }}"
+            kernel: "{{ diag_kernel | default('DESCONOCIDO') }}"
+            python: "{{ diag_python | default('NO DISPONIBLE') }}"
+            sudo: "{{ diag_sudo_ok | default(false) }}"
+        per_host: false
+        aggregate: true
