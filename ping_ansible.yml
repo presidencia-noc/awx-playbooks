@@ -1,0 +1,11 @@
+---
+- hosts: all
+  gather_facts: false
+
+  tasks:
+
+    - name: Ping Ansible
+      ping:
+
+    - debug:
+        msg: "PING OK"
