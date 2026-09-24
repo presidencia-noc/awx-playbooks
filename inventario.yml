@@ -32,37 +32,21 @@
           {{ wazuh.stdout | default('NO') }};
           OK
 
-    - name: Guardar línea para consolidación
+    - name: Consolidar resultados
       set_stats:
         aggregate: true
         data:
           inventario_lineas:
             - "{{ csv_line }}"
 
-- name: Publicar CSV
-  hosts: localhost
-  gather_facts: false
-
-  vars:
-    cabecera: "HOST;IP;SO;VERSION;PYTHON;OCS;WAZUH;ESTADO"
-
-  tasks:
-
-    - name: Mostrar CSV completo
+    - name: Mostrar CSV completo en el Job
+      run_once: true
+      delegate_to: localhost
       debug:
         msg: |
-          {{ cabecera }}
-          {% for host in groups['all'] %}
-          {% if hostvars[host].csv_line is defined %}
-          {{ hostvars[host].csv_line }}
-          {% else %}
-          {{ host }};
-          {{ hostvars[host].ansible_host | default('SIN_IP') }};
-          DESCONOCIDO;
-          N/D;
-          N/D;
-          NO;
-          NO;
-          ERROR_CONEXION
+          HOST;IP;SO;VERSION;PYTHON;OCS;WAZUH;ESTADO
+          {% for h in ansible_play_hosts_all %}
+          {% if hostvars[h].csv_line is defined %}
+          {{ hostvars[h].csv_line }}
           {% endif %}
           {% endfor %}
