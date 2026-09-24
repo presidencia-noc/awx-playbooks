@@ -1,5 +1,5 @@
 ---
-- name: Inventario Linux AWX
+- name: Inventario Linux CSV
   hosts: all
   gather_facts: true
   ignore_unreachable: true
@@ -8,79 +8,31 @@
 
     - name: Detectar OCS
       shell: |
-        if command -v ocsinventory-agent >/dev/null 2>&1; then
-          echo SI
-        else
-          echo NO
-        fi
+        command -v ocsinventory-agent >/dev/null 2>&1 && echo SI || echo NO
       register: ocs
       changed_when: false
       failed_when: false
 
     - name: Detectar Wazuh
       shell: |
-        if systemctl list-unit-files 2>/dev/null | grep -qi wazuh-agent; then
-          echo SI
-        elif [ -d /var/ossec ]; then
-          echo SI
-        else
-          echo NO
-        fi
+        [ -d /var/ossec ] && echo SI || echo NO
       register: wazuh
       changed_when: false
       failed_when: false
 
-    - name: Consolidar datos
+    - name: Agregar host a la lista
       set_fact:
-        inventario:
-          host: "{{ inventory_hostname }}"
-          ip: "{{ ansible_default_ipv4.address | default(ansible_host | default('SIN_IP')) }}"
-          so: "{{ ansible_distribution | default('DESCONOCIDO') }}"
-          version: "{{ ansible_distribution_version | default('N/D') }}"
-          kernel: "{{ ansible_kernel | default('N/D') }}"
-          python: "{{ ansible_python_version | default('N/D') }}"
-          ocs: "{{ ocs.stdout | default('NO') }}"
-          wazuh: "{{ wazuh.stdout | default('NO') }}"
-          conectividad: "OK"
-
-    - name: Exportar CSV
-      delegate_to: localhost
-      lineinfile:
-        path: /tmp/inventario_awx.csv
-        create: yes
-        insertafter: EOF
-        line: >-
-          {{ inventario.host }};
-          {{ inventario.ip }};
-          {{ inventario.so }};
-          {{ inventario.version }};
-          {{ inventario.kernel }};
-          {{ inventario.python }};
-          {{ inventario.ocs }};
-          {{ inventario.wazuh }};
-          {{ inventario.conectividad }}
-
-- name: Hosts inaccesibles
-  hosts: all
-  gather_facts: false
-  ignore_unreachable: true
-
-  tasks:
-
-    - name: Registrar hosts inaccesibles
-      delegate_to: localhost
-      lineinfile:
-        path: /tmp/inventario_awx.csv
-        create: yes
-        insertafter: EOF
-        line: >-
+        csv_line: >-
           {{ inventory_hostname }};
-          SIN_IP;
-          DESCONOCIDO;
-          N/D;
-          N/D;
-          N/D;
-          NO;
-          NO;
-          UNREACHABLE
-      when: inventory_hostname in ansible_play_hosts_all and inventory_hostname not in ansible_play_hosts
+          {{ ansible_default_ipv4.address | default(ansible_host | default('SIN_IP')) }};
+          {{ ansible_distribution }};
+          {{ ansible_distribution_version }};
+          {{ ansible_python_version | default('N/D') }};
+          {{ ocs.stdout }};
+          {{ wazuh.stdout }};
+          OK
+
+    - name: Guardar línea
+      set_stats:
+        data:
+          hosts_csv: "{{ (ansible_stats.data.hosts_csv | default([])) + [csv_line] }}"
