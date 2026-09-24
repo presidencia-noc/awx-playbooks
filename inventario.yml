@@ -1,0 +1,35 @@
+---
+- name: Exportar inventario Linux
+  hosts: all
+  gather_facts: true
+
+  pre_tasks:
+
+    - name: Crear cabecera CSV
+      delegate_to: localhost
+      run_once: true
+      copy:
+        dest: /tmp/inventario_linux.csv
+        content: |
+          HOSTNAME;IP;SO;VERSION;KERNEL;PYTHON
+
+  tasks:
+
+    - name: Obtener version Python
+      shell: python3 --version 2>/dev/null | awk '{print $2}'
+      register: python_version
+      changed_when: false
+      failed_when: false
+
+    - name: Agregar registro al CSV
+      delegate_to: localhost
+      lineinfile:
+        path: /tmp/inventario_linux.csv
+        insertafter: EOF
+        line: >-
+          {{ inventory_hostname }};
+          {{ ansible_default_ipv4.address | default(ansible_host | default('SIN_IP')) }};
+          {{ ansible_distribution }};
+          {{ ansible_distribution_version }};
+          {{ ansible_kernel }};
+          {{ python_version.stdout | default('N/A') }}
