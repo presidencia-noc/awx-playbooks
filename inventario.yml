@@ -1,30 +1,20 @@
 ---
-############################################################
-# Crear archivo CSV
-############################################################
-
-- name: Preparar CSV
-  hosts: localhost
-  gather_facts: false
-
-  tasks:
-
-    - name: Crear cabecera CSV
-      copy:
-        dest: /runner/artifacts/inventario.csv
-        content: |
-          HOST;IP;SO;VERSION;PYTHON;OCS;WAZUH;ESTADO
-
-############################################################
-# Inventario Linux
-############################################################
-
-- name: Inventario Linux
+- name: Inventario Linux AWX
   hosts: all
   gather_facts: true
   ignore_unreachable: true
 
   tasks:
+
+    - name: Crear CSV con cabecera
+      run_once: true
+      delegate_to: localhost
+      become: false
+
+      copy:
+        dest: /tmp/inventario.csv
+        content: |
+          HOST;IP;SO;VERSION;PYTHON;OCS;WAZUH;ESTADO
 
     - name: Detectar OCS
       shell: |
@@ -45,7 +35,7 @@
       become: false
 
       lineinfile:
-        path: /runner/artifacts/inventario.csv
+        path: /tmp/inventario.csv
         insertafter: EOF
 
         line: >-
@@ -58,34 +48,8 @@
           {{ wazuh.stdout | default('NO') }};
           OK
 
-############################################################
-# Hosts sin facts o inaccesibles
-############################################################
-
-- name: Hosts con problemas
-  hosts: all
-  gather_facts: false
-  ignore_unreachable: true
-
-  tasks:
-
-    - name: Registrar host con error
+    - name: Mostrar ubicación del CSV
+      run_once: true
       delegate_to: localhost
-      become: false
-
-      lineinfile:
-        path: /runner/artifacts/inventario.csv
-        insertafter: EOF
-
-        line: >-
-          {{ inventory_hostname }};
-          {{ ansible_host | default('SIN_IP') }};
-          DESCONOCIDO;
-          N/D;
-          N/D;
-          NO;
-          NO;
-          ERROR_CONEXION
-
-      when:
-        - hostvars[inventory_hostname].ansible_distribution is not defined
+      debug:
+        msg: "CSV generado en /tmp/inventario.csv"
