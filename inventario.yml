@@ -1,5 +1,25 @@
 ---
-- name: Inventario Linux CSV
+############################################################
+# Crear archivo CSV
+############################################################
+
+- name: Preparar CSV
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: Crear cabecera CSV
+      copy:
+        dest: /runner/artifacts/inventario.csv
+        content: |
+          HOST;IP;SO;VERSION;PYTHON;OCS;WAZUH;ESTADO
+
+############################################################
+# Inventario Linux
+############################################################
+
+- name: Inventario Linux
   hosts: all
   gather_facts: true
   ignore_unreachable: true
@@ -20,19 +40,52 @@
       changed_when: false
       failed_when: false
 
-    - name: Agregar host a la lista
-      set_fact:
-        csv_line: >-
+    - name: Agregar fila CSV
+      delegate_to: localhost
+      become: false
+
+      lineinfile:
+        path: /runner/artifacts/inventario.csv
+        insertafter: EOF
+
+        line: >-
           {{ inventory_hostname }};
           {{ ansible_default_ipv4.address | default(ansible_host | default('SIN_IP')) }};
-          {{ ansible_distribution }};
-          {{ ansible_distribution_version }};
+          {{ ansible_distribution | default('DESCONOCIDO') }};
+          {{ ansible_distribution_version | default('N/D') }};
           {{ ansible_python_version | default('N/D') }};
-          {{ ocs.stdout }};
-          {{ wazuh.stdout }};
+          {{ ocs.stdout | default('NO') }};
+          {{ wazuh.stdout | default('NO') }};
           OK
 
-    - name: Guardar línea
-      set_stats:
-        data:
-          hosts_csv: "{{ (ansible_stats.data.hosts_csv | default([])) + [csv_line] }}"
+############################################################
+# Hosts sin facts o inaccesibles
+############################################################
+
+- name: Hosts con problemas
+  hosts: all
+  gather_facts: false
+  ignore_unreachable: true
+
+  tasks:
+
+    - name: Registrar host con error
+      delegate_to: localhost
+      become: false
+
+      lineinfile:
+        path: /runner/artifacts/inventario.csv
+        insertafter: EOF
+
+        line: >-
+          {{ inventory_hostname }};
+          {{ ansible_host | default('SIN_IP') }};
+          DESCONOCIDO;
+          N/D;
+          N/D;
+          NO;
+          NO;
+          ERROR_CONEXION
+
+      when:
+        - hostvars[inventory_hostname].ansible_distribution is not defined
