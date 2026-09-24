@@ -6,16 +6,6 @@
 
   tasks:
 
-    - name: Crear CSV con cabecera
-      run_once: true
-      delegate_to: localhost
-      become: false
-
-      copy:
-        dest: /tmp/inventario.csv
-        content: |
-          HOST;IP;SO;VERSION;PYTHON;OCS;WAZUH;ESTADO
-
     - name: Detectar OCS
       shell: |
         command -v ocsinventory-agent >/dev/null 2>&1 && echo SI || echo NO
@@ -30,15 +20,9 @@
       changed_when: false
       failed_when: false
 
-    - name: Agregar fila CSV
-      delegate_to: localhost
-      become: false
-
-      lineinfile:
-        path: /tmp/inventario.csv
-        insertafter: EOF
-
-        line: >-
+    - name: Construir línea CSV
+      set_fact:
+        csv_line: >-
           {{ inventory_hostname }};
           {{ ansible_default_ipv4.address | default(ansible_host | default('SIN_IP')) }};
           {{ ansible_distribution | default('DESCONOCIDO') }};
@@ -48,8 +32,37 @@
           {{ wazuh.stdout | default('NO') }};
           OK
 
-    - name: Mostrar ubicación del CSV
-      run_once: true
-      delegate_to: localhost
+    - name: Guardar línea para consolidación
+      set_stats:
+        aggregate: true
+        data:
+          inventario_lineas:
+            - "{{ csv_line }}"
+
+- name: Publicar CSV
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    cabecera: "HOST;IP;SO;VERSION;PYTHON;OCS;WAZUH;ESTADO"
+
+  tasks:
+
+    - name: Mostrar CSV completo
       debug:
-        msg: "CSV generado en /tmp/inventario.csv"
+        msg: |
+          {{ cabecera }}
+          {% for host in groups['all'] %}
+          {% if hostvars[host].csv_line is defined %}
+          {{ hostvars[host].csv_line }}
+          {% else %}
+          {{ host }};
+          {{ hostvars[host].ansible_host | default('SIN_IP') }};
+          DESCONOCIDO;
+          N/D;
+          N/D;
+          NO;
+          NO;
+          ERROR_CONEXION
+          {% endif %}
+          {% endfor %}
