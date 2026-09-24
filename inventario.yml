@@ -84,4 +84,3 @@
           NO;
           UNREACHABLE
       when: inventory_hostname in ansible_play_hosts_all and inventory_hostname not in ansible_play_hosts
-``
