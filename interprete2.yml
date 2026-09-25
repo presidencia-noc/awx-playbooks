@@ -1,0 +1,9 @@
+- hosts: localhost
+  gather_facts: no
+
+  tasks:
+    - command: ansible --version
+      register: ans
+
+    - debug:
+        var: ans.stdout_lines
