@@ -1,0 +1,17 @@
+---
+- hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Verificar Ubuntu Pro
+      shell: |
+        if command -v pro >/dev/null 2>&1; then
+          pro status --format json
+        else
+          echo "NO_PRO"
+        fi
+      register: pro_status
+      changed_when: false
+
+    - debug:
+        var: pro_status.stdout
