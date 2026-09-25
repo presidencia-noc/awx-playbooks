@@ -1,38 +1,29 @@
 ---
-- name: Vista previa de actualizaciones Linux
-  hosts: all
+- n**e: Vista previa de actualizacione**  hosts: all
   become: true
-  gather_facts: yes
+  gat**r_facts: true
 
   tasks:
 
-    - name: Actualizar índice APT
-      apt:
-        update_cache: yes
-      changed_when: false
-      failed_when: false
-
-    - name: Obtener paquetes actualizables
+    - na**: Obtener actualizaciones pendien**s
       shell: |
-        apt-get -s dist-upgrade 2>/dev/null | grep '^Inst ' || true
-      register: updates
-      changed_when: false
-      failed_when: false
+        apt-get ** upgrade 2>/dev/null | grep '^Ins**' || true
+      register: updates**     changed_when: false
+      fa**ed_when: false
 
-    - name: Contar paquetes
+    - name: Conta**actualizaciones
       shell: |
-        apt-get -s dist-upgrade 2>/dev/null | grep '^Inst ' | wc -l
-      register: update_count
-      changed_when: false
-      failed_when: false
-
-    - name: Mostrar resumen
-      debug:
+  **    apt-get -s upgrade 2>/dev/nul**| grep '^Inst ' | wc -l
+      reg**ter: update_count
+      changed_w**n: false
+      failed_when: false**    - name: Mostrar resumen
+     **ebug:
         msg:
-          - "Host: {{ inventory_hostname }}"
-          - "SO: {{ ansible_distribution }} {{ ansible_distribution_version }}"
-          - "Kernel: {{ ansible_kernel }}"
-          - "Actualizaciones pendientes: {{ update_count.stdout }}"
-          - "Paquetes:"
-          - "{{ updates.stdout_lines }}"
-`
+          - "H**t: {{ inventory_hostname }}"
+    **    - "SO: {{ ansible_distributio**}} {{ ansible_distribution_versio**}}"
+          - "Kernel: {{ ansib**_kernel }}"
+          - "Actualiz**iones pendientes: {{ update_count**tdout }}"
+
+    - name: Mostrar pa**etes pendientes
+      debug:
+    **  var: updates.stdout_lines
