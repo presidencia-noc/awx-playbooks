@@ -1,29 +1,90 @@
 ---
-- n**e: Vista previa de actualizacione**  hosts: all
+- name: Vista previa y actualizacion de paquetes APT
+  hosts: all
   become: true
-  gat**r_facts: true
+  gather_facts: true
+  serial: 1
 
   tasks:
+    - name: Omitir sistemas que no utilizan APT
+      ansible.builtin.meta: end_host
+      when: ansible_facts.os_family != "Debian"
 
-    - na**: Obtener actualizaciones pendien**s
-      shell: |
-        apt-get ** upgrade 2>/dev/null | grep '^Ins**' || true
-      register: updates**     changed_when: false
-      fa**ed_when: false
+    - name: Actualizar cache APT
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        update_cache_retries: 3
+        update_cache_retry_max_delay: 15
+      register: apt_cache_result
 
-    - name: Conta**actualizaciones
-      shell: |
-  **    apt-get -s upgrade 2>/dev/nul**| grep '^Inst ' | wc -l
-      reg**ter: update_count
-      changed_w**n: false
-      failed_when: false**    - name: Mostrar resumen
-     **ebug:
+    - name: Obtener vista previa de actualizaciones
+      ansible.builtin.shell: |
+        set -o pipefail
+        apt-get --simulate dist-upgrade 2>/dev/null | grep '^Inst ' || true
+      args:
+        executable: /bin/bash
+      register: updates_preview
+      changed_when: false
+      failed_when: false
+
+    - name: Contar actualizaciones pendientes
+      ansible.builtin.set_fact:
+        updates_count: "{{ updates_preview.stdout_lines | default([]) | length }}"
+
+    - name: Mostrar resumen previo
+      ansible.builtin.debug:
         msg:
-          - "H**t: {{ inventory_hostname }}"
-    **    - "SO: {{ ansible_distributio**}} {{ ansible_distribution_versio**}}"
-          - "Kernel: {{ ansib**_kernel }}"
-          - "Actualiz**iones pendientes: {{ update_count**tdout }}"
+          - "Host: {{ inventory_hostname }}"
+          - "IP: {{ ansible_host | default(ansible_default_ipv4.address | default('desconocida')) }}"
+          - "Sistema operativo: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Kernel actual: {{ ansible_kernel }}"
+          - "Python remoto: {{ ansible_python_version | default('desconocido') }}"
+          - "Paquetes pendientes: {{ updates_count }}"
 
-    - name: Mostrar pa**etes pendientes
-      debug:
-    **  var: updates.stdout_lines
+    - name: Mostrar paquetes que se actualizaran
+      ansible.builtin.debug:
+        var: updates_preview.stdout_lines
+      when: updates_count | int > 0
+
+    - name: Informar que no hay actualizaciones
+      ansible.builtin.debug:
+        msg: "El host no tiene paquetes pendientes de actualizacion."
+      when: updates_count | int == 0
+
+    - name: Actualizar paquetes
+      ansible.builtin.apt:
+        upgrade: dist
+        autoremove: true
+        autoclean: true
+        force_apt_get: true
+      register: upgrade_result
+      when: updates_count | int > 0
+
+    - name: Verificar reinicio pendiente
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+
+    - name: Obtener paquetes que requieren reinicio
+      ansible.builtin.slurp:
+        src: /var/run/reboot-required.pkgs
+      register: reboot_packages
+      failed_when: false
+      when: reboot_required.stat.exists | default(false)
+
+    - name: Mostrar resultado final
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Paquetes detectados antes de actualizar: {{ updates_count }}"
+          - "Actualizacion ejecutada: {{ 'SI' if updates_count | int > 0 else 'NO ERA NECESARIA' }}"
+          - "Se realizaron cambios: {{ upgrade_result.changed | default(false) | ternary('SI', 'NO') }}"
+          - "Reinicio pendiente: {{ reboot_required.stat.exists | default(false) | ternary('SI', 'NO') }}"
+
+    - name: Mostrar paquetes relacionados con el reinicio
+      ansible.builtin.debug:
+        msg: "{{ reboot_packages.content | b64decode | trim }}"
+      when:
+        - reboot_required.stat.exists | default(false)
+        - reboot_packages.content is defined
