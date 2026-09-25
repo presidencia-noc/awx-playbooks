@@ -1,31 +1,28 @@
 ---
-- name: Auditoria Linux
+- name: Vista previa de actualizaciones Linux
   hosts: all
+  become: true
   gather_facts: yes
-  become: yes
 
   tasks:
 
-    - name: Verificar Ubuntu Pro
-      command: pro status --format json
-      register: pro_status
+    - name: Actualizar índice APT
+      apt:
+        update_cache: yes
       changed_when: false
       failed_when: false
 
-    - name: Verificar acceso a ESM
-      shell: timeout 10 wget -q --spider https://esm.ubuntu.com
-      register: esm_status
+    - name: Obtener paquetes actualizables
+      shell: |
+        apt-get -s dist-upgrade 2>/dev/null | grep '^Inst ' || true
+      register: updates
       changed_when: false
       failed_when: false
 
-    - name: Verificar reinicio pendiente
-      stat:
-        path: /var/run/reboot-required
-      register: reboot_required
-
-    - name: Contar actualizaciones disponibles
-      shell: apt list --upgradable 2>/dev/null | tail -n +2 | wc -l
-      register: upgradable
+    - name: Contar paquetes
+      shell: |
+        apt-get -s dist-upgrade 2>/dev/null | grep '^Inst ' | wc -l
+      register: update_count
       changed_when: false
       failed_when: false
 
@@ -35,8 +32,7 @@
           - "Host: {{ inventory_hostname }}"
           - "SO: {{ ansible_distribution }} {{ ansible_distribution_version }}"
           - "Kernel: {{ ansible_kernel }}"
-          - "Python: {{ ansible_python_version | default('Desconocido') }}"
-          - "Actualizaciones: {{ upgradable.stdout | default('0') }}"
-          - "Reinicio pendiente: {{ reboot_required.stat.exists | ternary('SI','NO') }}"
-          - "ESM accesible: {{ 'SI' if esm_status.rc == 0 else 'NO' }}"
-          - "Ubuntu Pro: {{ 'OK' if pro_status.rc == 0 else 'SIN PRO O SIN CONECTIVIDAD' }}"
+          - "Actualizaciones pendientes: {{ update_count.stdout }}"
+          - "Paquetes:"
+          - "{{ updates.stdout_lines }}"
+`
