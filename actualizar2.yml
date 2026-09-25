@@ -1,0 +1,10 @@
+---
+- hosts: NGINX-DMZ
+  become: yes
+
+  tasks:
+    - name: apt update
+      command: apt-get update
+
+    - name: apt upgrade
+      command: apt-get -y dist-upgrade
