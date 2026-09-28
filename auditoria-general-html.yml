@@ -6,10 +6,6 @@
   serial: 1
   ignore_unreachable: true
 
-  vars:
-    reporte_dir: "/tmp"
-    reporte_html: "/tmp/reporte_actualizaciones_linux.html"
-
   tasks:
 
     - name: Inicializar variables
@@ -31,8 +27,7 @@
 
         - name: Obtener vista previa
           shell: |
-            apt-get --simulate dist-upgrade 2>/dev/null |
-            grep '^Inst ' || true
+            apt-get --simulate dist-upgrade 2>/dev/null | grep '^Inst ' || true
           register: updates_preview
           changed_when: false
           failed_when: false
@@ -61,7 +56,7 @@
             path: /var/run/reboot-required
           register: reboot_required
 
-        - name: Marcar estado reboot
+        - name: Marcar reinicio requerido
           set_fact:
             estado_awx: "REBOOT"
           when:
@@ -74,30 +69,11 @@
             estado_awx: "ERROR"
             motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
 
-    - name: Crear resumen por host
-      set_fact:
-        reporte_host:
-          hostname: "{{ inventory_hostname }}"
-          ip: "{{ ansible_host | default('N/D') }}"
-          so: "{{ ansible_distribution | default('N/D') }}"
-          version: "{{ ansible_distribution_version | default('N/D') }}"
-          kernel: "{{ ansible_kernel | default('N/D') }}"
-          python: "{{ ansible_python_version | default('N/D') }}"
-          updates: "{{ updates_count | default('N/D') }}"
-          estado: "{{ estado_awx }}"
-          motivo: "{{ motivo_awx }}"
+#################################################################
+# REPORTE HTML
+#################################################################
 
-    - name: Publicar resultado
-      set_stats:
-        data:
-          "{{ inventory_hostname }}": "{{ reporte_host }}"
-        aggregate: true
-
-######################################################################
-# REPORTE CONSOLIDADO
-######################################################################
-
-- name: Generar reporte HTML consolidado
+- name: Generar Reporte HTML
   hosts: localhost
   gather_facts: false
 
@@ -106,7 +82,7 @@
 
   tasks:
 
-    - name: Generar archivo HTML
+    - name: Generar HTML
       copy:
         dest: "{{ reporte_html }}"
         content: |
@@ -115,45 +91,42 @@
           <meta charset="utf-8">
 
           <style>
-          body {
-              font-family: Arial, Helvetica, sans-serif;
-              margin: 20px;
-          }
 
-          h1 {
-              color: #1f4e79;
+          body {
+            font-family: Arial, Helvetica, sans-serif;
+            margin: 20px;
           }
 
           table {
-              border-collapse: collapse;
-              width: 100%;
+            border-collapse: collapse;
+            width: 100%;
           }
 
           th {
-              background: #1f4e79;
-              color: white;
-              padding: 8px;
+            background: #1f4e79;
+            color: white;
+            padding: 8px;
           }
 
           td {
-              border: 1px solid #cccccc;
-              padding: 8px;
+            border: 1px solid #cccccc;
+            padding: 8px;
           }
 
           .ok {
-              background: #d4edda;
+            background: #d4edda;
           }
 
           .reboot {
-              background: #fff3cd;
+            background: #fff3cd;
           }
 
           .error {
-              background: #f8d7da;
+            background: #f8d7da;
           }
 
           .unreachable {
-              background: #ffb3b3;
+            background: #ffb3b3;
           }
 
           </style>
@@ -164,7 +137,8 @@
           <h1>Reporte de Actualizaciones Linux</h1>
 
           <p>
-          Fecha: {{ lookup('pipe','date "+%Y-%m-%d %H:%M:%S"') }}
+          Fecha:
+          {{ lookup('pipe','date "+%Y-%m-%d %H:%M:%S"') }}
           </p>
 
           <table>
@@ -173,7 +147,7 @@
             <th>Hostname</th>
             <th>IP</th>
             <th>Sistema</th>
-            <th>Version</th>
+            <th>Versión</th>
             <th>Kernel</th>
             <th>Python</th>
             <th>Actualizaciones</th>
@@ -185,58 +159,60 @@
 
           <tr>
 
-          <td>{{ host }}</td>
+            <td>{{ host }}</td>
 
-          <td>
-          {{ hostvars[host].ansible_host | default('N/D') }}
-          </td>
+            <td>
+            {{ hostvars.get(host, {}).get('ansible_host', 'N/D') }}
+            </td>
 
-          <td>
-          {{ hostvars[host].ansible_distribution | default('N/D') }}
-          </td>
+            <td>
+            {{ hostvars.get(host, {}).get('ansible_distribution', 'N/D') }}
+            </td>
 
-          <td>
-          {{ hostvars[host].ansible_distribution_version | default('N/D') }}
-          </td>
+            <td>
+            {{ hostvars.get(host, {}).get('ansible_distribution_version', 'N/D') }}
+            </td>
 
-          <td>
-          {{ hostvars[host].ansible_kernel | default('N/D') }}
-          </td>
+            <td>
+            {{ hostvars.get(host, {}).get('ansible_kernel', 'N/D') }}
+            </td>
 
-          <td>
-          {{ hostvars[host].ansible_python_version | default('N/D') }}
-          </td>
+            <td>
+            {{ hostvars.get(host, {}).get('ansible_python_version', 'N/D') }}
+            </td>
 
-          <td>
-          {{ hostvars[host].updates_count | default('N/D') }}
-          </td>
+            <td>
+            {{ hostvars.get(host, {}).get('updates_count', 'N/D') }}
+            </td>
 
-          {% if hostvars[host].estado_awx is defined %}
+            {% if hostvars.get(host, {}).get('estado_awx') == 'OK' %}
 
-              {% if hostvars[host].estado_awx == 'OK' %}
-                  <td class="ok">OK</td>
-              {% elif hostvars[host].estado_awx == 'REBOOT' %}
-                  <td class="reboot">REBOOT</td>
-              {% elif hostvars[host].estado_awx == 'ERROR' %}
-                  <td class="error">ERROR</td>
-              {% endif %}
+              <td class="ok">OK</td>
+              <td></td>
 
+            {% elif hostvars.get(host, {}).get('estado_awx') == 'REBOOT' %}
+
+              <td class="reboot">REBOOT</td>
+              <td>Reinicio pendiente</td>
+
+            {% elif hostvars.get(host, {}).get('estado_awx') == 'ERROR' %}
+
+              <td class="error">ERROR</td>
               <td>
-              {{ hostvars[host].motivo_awx | default('') }}
+                {{ hostvars.get(host, {}).get('motivo_awx', '') }}
               </td>
 
-          {% else %}
+            {% else %}
 
               <td class="unreachable">
-              UNREACHABLE
+                UNREACHABLE
               </td>
 
               <td>
-              Host inaccesible.
-              Verificar DNS, red, firewall, VPN o SSH.
+                Host inaccesible durante la ejecución (SSH/DNS/Firewall/VPN)
               </td>
 
-          {% endif %}
+            {% endif %}
 
           </tr>
 
@@ -247,6 +223,6 @@
           </body>
           </html>
 
-    - name: Mostrar ubicacion del reporte
+    - name: Mostrar ubicación
       debug:
         msg: "Reporte generado en {{ reporte_html }}"
