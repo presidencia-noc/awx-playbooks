@@ -1,0 +1,252 @@
+---
+- name: Actualizacion Linux y Reporte Consolidado
+  hosts: all
+  become: true
+  gather_facts: true
+  serial: 1
+  ignore_unreachable: true
+
+  vars:
+    reporte_dir: "/tmp"
+    reporte_html: "/tmp/reporte_actualizaciones_linux.html"
+
+  tasks:
+
+    - name: Inicializar variables
+      set_fact:
+        estado_awx: "OK"
+        motivo_awx: ""
+        updates_count: 0
+
+    - name: Omitir sistemas que no utilizan APT
+      meta: end_host
+      when: ansible_os_family != "Debian"
+
+    - block:
+
+        - name: Actualizar cache
+          shell: apt-get update
+          register: apt_update
+          changed_when: false
+
+        - name: Obtener vista previa
+          shell: |
+            apt-get --simulate dist-upgrade 2>/dev/null |
+            grep '^Inst ' || true
+          register: updates_preview
+          changed_when: false
+          failed_when: false
+
+        - name: Contar actualizaciones
+          set_fact:
+            updates_count: "{{ updates_preview.stdout_lines | length }}"
+
+        - name: Ejecutar actualizacion
+          shell: |
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -y dist-upgrade
+          register: upgrade_result
+          when: updates_count | int > 0
+
+        - name: Autoremove
+          shell: apt-get -y autoremove
+          when: updates_count | int > 0
+
+        - name: Autoclean
+          shell: apt-get -y autoclean
+          when: updates_count | int > 0
+
+        - name: Detectar reinicio requerido
+          stat:
+            path: /var/run/reboot-required
+          register: reboot_required
+
+        - name: Marcar estado reboot
+          set_fact:
+            estado_awx: "REBOOT"
+          when:
+            - reboot_required.stat.exists | default(false)
+
+      rescue:
+
+        - name: Registrar error
+          set_fact:
+            estado_awx: "ERROR"
+            motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
+
+    - name: Crear resumen por host
+      set_fact:
+        reporte_host:
+          hostname: "{{ inventory_hostname }}"
+          ip: "{{ ansible_host | default('N/D') }}"
+          so: "{{ ansible_distribution | default('N/D') }}"
+          version: "{{ ansible_distribution_version | default('N/D') }}"
+          kernel: "{{ ansible_kernel | default('N/D') }}"
+          python: "{{ ansible_python_version | default('N/D') }}"
+          updates: "{{ updates_count | default('N/D') }}"
+          estado: "{{ estado_awx }}"
+          motivo: "{{ motivo_awx }}"
+
+    - name: Publicar resultado
+      set_stats:
+        data:
+          "{{ inventory_hostname }}": "{{ reporte_host }}"
+        aggregate: true
+
+######################################################################
+# REPORTE CONSOLIDADO
+######################################################################
+
+- name: Generar reporte HTML consolidado
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    reporte_html: "/tmp/reporte_actualizaciones_linux.html"
+
+  tasks:
+
+    - name: Generar archivo HTML
+      copy:
+        dest: "{{ reporte_html }}"
+        content: |
+          <html>
+          <head>
+          <meta charset="utf-8">
+
+          <style>
+          body {
+              font-family: Arial, Helvetica, sans-serif;
+              margin: 20px;
+          }
+
+          h1 {
+              color: #1f4e79;
+          }
+
+          table {
+              border-collapse: collapse;
+              width: 100%;
+          }
+
+          th {
+              background: #1f4e79;
+              color: white;
+              padding: 8px;
+          }
+
+          td {
+              border: 1px solid #cccccc;
+              padding: 8px;
+          }
+
+          .ok {
+              background: #d4edda;
+          }
+
+          .reboot {
+              background: #fff3cd;
+          }
+
+          .error {
+              background: #f8d7da;
+          }
+
+          .unreachable {
+              background: #ffb3b3;
+          }
+
+          </style>
+          </head>
+
+          <body>
+
+          <h1>Reporte de Actualizaciones Linux</h1>
+
+          <p>
+          Fecha: {{ lookup('pipe','date "+%Y-%m-%d %H:%M:%S"') }}
+          </p>
+
+          <table>
+
+          <tr>
+            <th>Hostname</th>
+            <th>IP</th>
+            <th>Sistema</th>
+            <th>Version</th>
+            <th>Kernel</th>
+            <th>Python</th>
+            <th>Actualizaciones</th>
+            <th>Estado</th>
+            <th>Motivo</th>
+          </tr>
+
+          {% for host in groups['all'] %}
+
+          <tr>
+
+          <td>{{ host }}</td>
+
+          <td>
+          {{ hostvars[host].ansible_host | default('N/D') }}
+          </td>
+
+          <td>
+          {{ hostvars[host].ansible_distribution | default('N/D') }}
+          </td>
+
+          <td>
+          {{ hostvars[host].ansible_distribution_version | default('N/D') }}
+          </td>
+
+          <td>
+          {{ hostvars[host].ansible_kernel | default('N/D') }}
+          </td>
+
+          <td>
+          {{ hostvars[host].ansible_python_version | default('N/D') }}
+          </td>
+
+          <td>
+          {{ hostvars[host].updates_count | default('N/D') }}
+          </td>
+
+          {% if hostvars[host].estado_awx is defined %}
+
+              {% if hostvars[host].estado_awx == 'OK' %}
+                  <td class="ok">OK</td>
+              {% elif hostvars[host].estado_awx == 'REBOOT' %}
+                  <td class="reboot">REBOOT</td>
+              {% elif hostvars[host].estado_awx == 'ERROR' %}
+                  <td class="error">ERROR</td>
+              {% endif %}
+
+              <td>
+              {{ hostvars[host].motivo_awx | default('') }}
+              </td>
+
+          {% else %}
+
+              <td class="unreachable">
+              UNREACHABLE
+              </td>
+
+              <td>
+              Host inaccesible.
+              Verificar DNS, red, firewall, VPN o SSH.
+              </td>
+
+          {% endif %}
+
+          </tr>
+
+          {% endfor %}
+
+          </table>
+
+          </body>
+          </html>
+
+    - name: Mostrar ubicacion del reporte
+      debug:
+        msg: "Reporte generado en {{ reporte_html }}"
