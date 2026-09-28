@@ -2,7 +2,7 @@
 - name: Vista previa y actualizacion de paquetes Debian Ubuntu
   hosts: all
   become: true
-  gather_facts: true
+  gather_facts: false
   serial: 1
 
   tasks:
