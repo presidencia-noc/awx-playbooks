@@ -1,0 +1,141 @@
+######################################################################
+# RESUMEN EJECUTIVO
+######################################################################
+
+- name: Generar resumen y enviar correo
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+
+    smtp_host: "{{ lookup('env','SMTP_HOST') }}"
+    smtp_port: "{{ lookup('env','SMTP_PORT') | int }}"
+    smtp_user: "{{ lookup('env','SMTP_USERNAME') }}"
+    smtp_pass: "{{ lookup('env','SMTP_PASSWORD') }}"
+    smtp_from: "{{ lookup('env','SMTP_FROM') }}"
+    smtp_to: "{{ lookup('env','SMTP_TO') }}"
+
+  tasks:
+
+    - name: Calcular OK
+      set_fact:
+        total_ok: >-
+          {{
+            groups['all']
+            | map('extract', hostvars)
+            | selectattr('estado_awx','defined')
+            | selectattr('estado_awx','equalto','OK')
+            | list | length
+          }}
+
+    - name: Calcular REBOOT
+      set_fact:
+        total_reboot: >-
+          {{
+            groups['all']
+            | map('extract', hostvars)
+            | selectattr('estado_awx','defined')
+            | selectattr('estado_awx','equalto','REBOOT')
+            | list | length
+          }}
+
+    - name: Calcular ERROR
+      set_fact:
+        total_error: >-
+          {{
+            groups['all']
+            | map('extract', hostvars)
+            | selectattr('estado_awx','defined')
+            | selectattr('estado_awx','equalto','ERROR')
+            | list | length
+          }}
+
+    - name: Calcular UNREACHABLE
+      set_fact:
+        total_unreachable: >-
+          {{
+            groups['all'] | length
+            - total_ok | int
+            - total_reboot | int
+            - total_error | int
+          }}
+
+    - name: Calcular total hosts
+      set_fact:
+        total_hosts: "{{ groups['all'] | length }}"
+
+    - name: Construir cuerpo HTML
+      set_fact:
+        cuerpo_html: |
+
+          <html>
+          <body style="font-family: Arial, Helvetica, sans-serif;">
+
+          <h2>Reporte de Actualizaciones Linux</h2>
+
+          <h3>Resumen Ejecutivo</h3>
+
+          <table border="1" cellpadding="5" cellspacing="0">
+
+            <tr style="background:#1f4e79;color:white;">
+              <th>Total</th>
+              <th>OK</th>
+              <th>REBOOT</th>
+              <th>ERROR</th>
+              <th>UNREACHABLE</th>
+            </tr>
+
+            <tr>
+              <td>{{ total_hosts }}</td>
+              <td style="background:#d4edda">{{ total_ok }}</td>
+              <td style="background:#fff3cd">{{ total_reboot }}</td>
+              <td style="background:#f8d7da">{{ total_error }}</td>
+              <td style="background:#ffb3b3">{{ total_unreachable }}</td>
+            </tr>
+
+          </table>
+
+          <br>
+
+          <p>
+          Se adjunta el informe HTML completo generado por AWX.
+          </p>
+
+          <hr>
+
+          <p>
+          Fecha:
+          {{ lookup('pipe','date "+%d/%m/%Y %H:%M:%S"') }}
+          </p>
+
+          </body>
+          </html>
+
+    - name: Enviar informe HTML
+      community.general.mail:
+
+        host: "{{ smtp_host }}"
+        port: "{{ smtp_port }}"
+
+        username: "{{ smtp_user }}"
+        password: "{{ smtp_pass }}"
+
+        secure: starttls
+
+        from: "{{ smtp_from }}"
+        to:
+          - "{{ smtp_to }}"
+
+        subject: >-
+          [AWX][Linux]
+          OK={{ total_ok }}
+          REBOOT={{ total_reboot }}
+          ERROR={{ total_error }}
+          UNREACHABLE={{ total_unreachable }}
+
+        subtype: html
+
+        body: "{{ cuerpo_html }}"
+
+        attach:
+          - "{{ reporte_html }}"
