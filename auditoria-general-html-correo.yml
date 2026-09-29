@@ -110,4 +110,14 @@
 
           </body>
           </html>
-
+- name: Resumen ejecutivo
+  debug:
+    msg:
+      - "===================================="
+      - "RESUMEN AUDITORIA LINUX"
+      - "===================================="
+      - "Hosts procesados: {{ groups['all'] | length }}"
+      - "OK: {{ total_ok | default(0) }}"
+      - "REBOOT: {{ total_reboot | default(0) }}"
+      - "ERROR: {{ total_error | default(0) }}"
+      - "UNREACHABLE: {{ total_unreachable | default(0) }}"
