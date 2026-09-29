@@ -1,23 +1,92 @@
-######################################################################
-# RESUMEN EJECUTIVO
-######################################################################
-
-- name: Generar resumen y enviar correo
+---
+- name: Auditoria Linux
   hosts: all
+  become: true
   gather_facts: false
-
-  vars:
-
-    smtp_host: "{{ lookup('env','SMTP_HOST') }}"
-    smtp_port: "{{ lookup('env','SMTP_PORT') | int }}"
-    smtp_user: "{{ lookup('env','SMTP_USERNAME') }}"
-    smtp_pass: "{{ lookup('env','SMTP_PASSWORD') }}"
-    smtp_from: "{{ lookup('env','SMTP_FROM') }}"
-    smtp_to: "{{ lookup('env','SMTP_TO') }}"
+  serial: 1
+  ignore_unreachable: true
 
   tasks:
 
-    - name: Calcular OK
+    - name: Inicializar estado
+      set_fact:
+        estado_awx: "UNREACHABLE"
+        motivo_awx: "Host no accesible"
+        updates_count: 0
+
+    - block:
+
+        - name: Recolectar facts
+          setup:
+
+        - name: Inicializar host accesible
+          set_fact:
+            estado_awx: "OK"
+            motivo_awx: ""
+            updates_count: 0
+
+        - name: Validar Debian Ubuntu
+          meta: end_host
+          when:
+            - ansible_os_family is defined
+            - ansible_os_family != "Debian"
+
+        - name: Actualizar cache
+          shell: apt-get update
+          changed_when: false
+
+        - name: Detectar actualizaciones pendientes
+          shell: |
+            apt-get --simulate dist-upgrade 2>/dev/null | grep '^Inst ' || true
+          register: updates_preview
+          changed_when: false
+          failed_when: false
+
+        - name: Contar actualizaciones
+          set_fact:
+            updates_count: "{{ updates_preview.stdout_lines | length }}"
+
+        - name: Detectar reboot requerido
+          stat:
+            path: /var/run/reboot-required
+          register: reboot_required
+
+        - name: Estado reboot
+          set_fact:
+            estado_awx: "REBOOT"
+            motivo_awx: "Reinicio pendiente"
+          when:
+            - reboot_required.stat.exists | default(false)
+
+        - name: Mostrar resumen host
+          debug:
+            msg:
+              - "Host: {{ inventory_hostname }}"
+              - "IP: {{ ansible_host | default('N/D') }}"
+              - "SO: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+              - "Kernel: {{ ansible_kernel }}"
+              - "Python: {{ ansible_python_version }}"
+              - "Actualizaciones pendientes: {{ updates_count }}"
+              - "Estado: {{ estado_awx }}"
+
+      rescue:
+
+        - name: Marcar error
+          set_fact:
+            estado_awx: "ERROR"
+            motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
+
+#############################################################
+# RESUMEN EJECUTIVO
+#############################################################
+
+- name: Resumen Ejecutivo
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: Contar hosts OK
       set_fact:
         total_ok: >-
           {{
@@ -25,10 +94,11 @@
             | map('extract', hostvars)
             | selectattr('estado_awx','defined')
             | selectattr('estado_awx','equalto','OK')
-            | list | length
+            | list
+            | length
           }}
 
-    - name: Calcular REBOOT
+    - name: Contar hosts REBOOT
       set_fact:
         total_reboot: >-
           {{
@@ -36,10 +106,11 @@
             | map('extract', hostvars)
             | selectattr('estado_awx','defined')
             | selectattr('estado_awx','equalto','REBOOT')
-            | list | length
+            | list
+            | length
           }}
 
-    - name: Calcular ERROR
+    - name: Contar hosts ERROR
       set_fact:
         total_error: >-
           {{
@@ -47,77 +118,46 @@
             | map('extract', hostvars)
             | selectattr('estado_awx','defined')
             | selectattr('estado_awx','equalto','ERROR')
-            | list | length
-          }}
-
-    - name: Calcular UNREACHABLE
-      set_fact:
-        total_unreachable: >-
-          {{
-            groups['all'] | length
-            - total_ok | int
-            - total_reboot | int
-            - total_error | int
+            | list
+            | length
           }}
 
     - name: Calcular total hosts
       set_fact:
         total_hosts: "{{ groups['all'] | length }}"
 
-    - name: Construir cuerpo HTML
+    - name: Calcular unreachable
       set_fact:
-        cuerpo_html: |
+        total_unreachable: >-
+          {{
+            total_hosts | int
+            - total_ok | int
+            - total_reboot | int
+            - total_error | int
+          }}
 
-          <html>
-          <body style="font-family: Arial, Helvetica, sans-serif;">
+    - name: Resumen Ejecutivo
+      debug:
+        msg:
+          - "============================================="
+          - "RESUMEN EJECUTIVO AUDITORIA LINUX"
+          - "============================================="
+          - "Total Hosts: {{ total_hosts }}"
+          - "OK: {{ total_ok }}"
+          - "REBOOT: {{ total_reboot }}"
+          - "ERROR: {{ total_error }}"
+          - "UNREACHABLE: {{ total_unreachable }}"
+          - "============================================="
 
-          <h2>Reporte de Actualizaciones Linux</h2>
-
-          <h3>Resumen Ejecutivo</h3>
-
-          <table border="1" cellpadding="5" cellspacing="0">
-
-            <tr style="background:#1f4e79;color:white;">
-              <th>Total</th>
-              <th>OK</th>
-              <th>REBOOT</th>
-              <th>ERROR</th>
-              <th>UNREACHABLE</th>
-            </tr>
-
-            <tr>
-              <td>{{ total_hosts }}</td>
-              <td style="background:#d4edda">{{ total_ok }}</td>
-              <td style="background:#fff3cd">{{ total_reboot }}</td>
-              <td style="background:#f8d7da">{{ total_error }}</td>
-              <td style="background:#ffb3b3">{{ total_unreachable }}</td>
-            </tr>
-
-          </table>
-
-          <br>
-
-          <p>
-          Se adjunta el informe HTML completo generado por AWX.
-          </p>
-
-          <hr>
-
-          <p>
-          Fecha:
-          {{ lookup('pipe','date "+%d/%m/%Y %H:%M:%S"') }}
-          </p>
-
-          </body>
-          </html>
-- name: Resumen ejecutivo
-  debug:
-    msg:
-      - "===================================="
-      - "RESUMEN AUDITORIA LINUX"
-      - "===================================="
-      - "Hosts procesados: {{ groups['all'] | length }}"
-      - "OK: {{ total_ok | default(0) }}"
-      - "REBOOT: {{ total_reboot | default(0) }}"
-      - "ERROR: {{ total_error | default(0) }}"
-      - "UNREACHABLE: {{ total_unreachable | default(0) }}"
+    - name: Detalle por host
+      debug:
+        msg:
+          - "Host: {{ item }}"
+          - "IP: {{ hostvars.get(item, {}).get('ansible_host', 'N/D') }}"
+          - "SO: {{ hostvars.get(item, {}).get('ansible_distribution', 'N/D') }} {{ hostvars.get(item, {}).get('ansible_distribution_version', '') }}"
+          - "Kernel: {{ hostvars.get(item, {}).get('ansible_kernel', 'N/D') }}"
+          - "Python: {{ hostvars.get(item, {}).get('ansible_python_version', 'N/D') }}"
+          - "Actualizaciones: {{ hostvars.get(item, {}).get('updates_count', 'N/D') }}"
+          - "Estado: {{ hostvars.get(item, {}).get('estado_awx', 'UNREACHABLE') }}"
+          - "Motivo: {{ hostvars.get(item, {}).get('motivo_awx', '') }}"
+      loop: "{{ groups['all'] }}"
