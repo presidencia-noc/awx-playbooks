@@ -51,34 +51,36 @@
             path: /var/run/reboot-required
           register: reboot_required
 
-        - name: Estado reboot
+        - name: Marcar reinicio requerido
           set_fact:
             estado_awx: "REBOOT"
             motivo_awx: "Reinicio pendiente"
           when:
             - reboot_required.stat.exists | default(false)
 
-        - name: Mostrar resumen host
+        - name: Resumen host
           debug:
             msg:
-              - "Host: {{ inventory_hostname }}"
-              - "IP: {{ ansible_host | default('N/D') }}"
-              - "SO: {{ ansible_distribution }} {{ ansible_distribution_version }}"
-              - "Kernel: {{ ansible_kernel }}"
-              - "Python: {{ ansible_python_version }}"
-              - "Actualizaciones pendientes: {{ updates_count }}"
-              - "Estado: {{ estado_awx }}"
+              - "--------------------------------------------------"
+              - "HOST      : {{ inventory_hostname }}"
+              - "IP        : {{ ansible_host | default('N/D') }}"
+              - "SO        : {{ ansible_distribution }} {{ ansible_distribution_version }}"
+              - "KERNEL    : {{ ansible_kernel }}"
+              - "PYTHON    : {{ ansible_python_version }}"
+              - "UPDATES   : {{ updates_count }}"
+              - "ESTADO    : {{ estado_awx }}"
+              - "--------------------------------------------------"
 
       rescue:
 
-        - name: Marcar error
+        - name: Registrar error
           set_fact:
             estado_awx: "ERROR"
             motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
 
-#############################################################
+######################################################################
 # RESUMEN EJECUTIVO
-#############################################################
+######################################################################
 
 - name: Resumen Ejecutivo
   hosts: localhost
@@ -86,7 +88,7 @@
 
   tasks:
 
-    - name: Contar hosts OK
+    - name: Calcular hosts OK
       set_fact:
         total_ok: >-
           {{
@@ -98,7 +100,7 @@
             | length
           }}
 
-    - name: Contar hosts REBOOT
+    - name: Calcular hosts REBOOT
       set_fact:
         total_reboot: >-
           {{
@@ -110,7 +112,7 @@
             | length
           }}
 
-    - name: Contar hosts ERROR
+    - name: Calcular hosts ERROR
       set_fact:
         total_error: >-
           {{
@@ -126,7 +128,7 @@
       set_fact:
         total_hosts: "{{ groups['all'] | length }}"
 
-    - name: Calcular unreachable
+    - name: Calcular UNREACHABLE
       set_fact:
         total_unreachable: >-
           {{
@@ -136,28 +138,29 @@
             - total_error | int
           }}
 
-    - name: Resumen Ejecutivo
+    - name: Mostrar resumen ejecutivo
       debug:
         msg:
-          - "============================================="
-          - "RESUMEN EJECUTIVO AUDITORIA LINUX"
-          - "============================================="
-          - "Total Hosts: {{ total_hosts }}"
-          - "OK: {{ total_ok }}"
-          - "REBOOT: {{ total_reboot }}"
-          - "ERROR: {{ total_error }}"
-          - "UNREACHABLE: {{ total_unreachable }}"
-          - "============================================="
+          - "=================================================="
+          - "AUDITORIA LINUX"
+          - "=================================================="
+          - "TOTAL HOSTS : {{ total_hosts }}"
+          - "OK          : {{ total_ok }}"
+          - "REBOOT      : {{ total_reboot }}"
+          - "ERROR       : {{ total_error }}"
+          - "UNREACHABLE : {{ total_unreachable }}"
+          - "=================================================="
 
-    - name: Detalle por host
+    - name: Mostrar detalle completo
       debug:
         msg:
-          - "Host: {{ item }}"
-          - "IP: {{ hostvars.get(item, {}).get('ansible_host', 'N/D') }}"
-          - "SO: {{ hostvars.get(item, {}).get('ansible_distribution', 'N/D') }} {{ hostvars.get(item, {}).get('ansible_distribution_version', '') }}"
-          - "Kernel: {{ hostvars.get(item, {}).get('ansible_kernel', 'N/D') }}"
-          - "Python: {{ hostvars.get(item, {}).get('ansible_python_version', 'N/D') }}"
-          - "Actualizaciones: {{ hostvars.get(item, {}).get('updates_count', 'N/D') }}"
-          - "Estado: {{ hostvars.get(item, {}).get('estado_awx', 'UNREACHABLE') }}"
-          - "Motivo: {{ hostvars.get(item, {}).get('motivo_awx', '') }}"
+          - "HOST      : {{ item }}"
+          - "IP        : {{ hostvars.get(item, {}).get('ansible_host', 'N/D') }}"
+          - "SO        : {{ hostvars.get(item, {}).get('ansible_distribution', 'N/D') }} {{ hostvars.get(item, {}).get('ansible_distribution_version', '') }}"
+          - "KERNEL    : {{ hostvars.get(item, {}).get('ansible_kernel', 'N/D') }}"
+          - "PYTHON    : {{ hostvars.get(item, {}).get('ansible_python_version', 'N/D') }}"
+          - "UPDATES   : {{ hostvars.get(item, {}).get('updates_count', 'N/D') }}"
+          - "ESTADO    : {{ hostvars.get(item, {}).get('estado_awx', 'UNREACHABLE') }}"
+          - "MOTIVO    : {{ hostvars.get(item, {}).get('motivo_awx', '') }}"
+          - "--------------------------------------------------"
       loop: "{{ groups['all'] }}"
