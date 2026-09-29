@@ -3,7 +3,7 @@
 ######################################################################
 
 - name: Generar resumen y enviar correo
-  hosts: localhost
+  hosts: all
   gather_facts: false
 
   vars:
