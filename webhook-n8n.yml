@@ -1,0 +1,15 @@
+---
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: Test webhook n8n
+      uri:
+        url: "https://n8n.presidencia.gob.ar/webhook-test/awx-test"
+        method: POST
+        body_format: json
+        body:
+          origen: awx
+          servidor: "{{ inventory_hostname }}"
+          fecha: "{{ lookup('pipe','date') }}"
