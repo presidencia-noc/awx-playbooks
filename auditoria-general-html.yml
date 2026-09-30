@@ -1,5 +1,9 @@
 ---
-- name: Auditoria Linux y envio a n8n
+########################################################################
+# AUDITORIA
+########################################################################
+
+- name: Auditoria Linux
   hosts: all
   become: true
   gather_facts: false
@@ -41,11 +45,11 @@
           changed_when: false
           failed_when: false
 
-        - name: Contar updates
+        - name: Contar actualizaciones
           set_fact:
             updates_count: "{{ updates_preview.stdout_lines | length }}"
 
-        - name: Detectar reboot
+        - name: Detectar reboot requerido
           stat:
             path: /var/run/reboot-required
           register: reboot_required
@@ -65,22 +69,27 @@
             motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
 
 ########################################################################
-# CONSOLIDACION
+# CONSOLIDACION Y ENVIO A N8N
 ########################################################################
 
 - name: Consolidar resultados y enviar a n8n
-  hosts: "{{ ansible_play_hosts_all[0] }}"
+  hosts: localhost
   gather_facts: false
   become: false
 
   tasks:
 
+    - name: Definir hosts ejecutados
+      set_fact:
+        hosts_ejecutados: "{{ groups['all'] | difference(['localhost']) }}"
+
     - name: Total OK
       set_fact:
         total_ok: >-
           {{
-            ansible_play_hosts_all
+            hosts_ejecutados
             | map('extract', hostvars)
+            | selectattr('estado_awx','defined')
             | selectattr('estado_awx','equalto','OK')
             | list
             | length
@@ -90,8 +99,9 @@
       set_fact:
         total_reboot: >-
           {{
-            ansible_play_hosts_all
+            hosts_ejecutados
             | map('extract', hostvars)
+            | selectattr('estado_awx','defined')
             | selectattr('estado_awx','equalto','REBOOT')
             | list
             | length
@@ -101,16 +111,17 @@
       set_fact:
         total_error: >-
           {{
-            ansible_play_hosts_all
+            hosts_ejecutados
             | map('extract', hostvars)
+            | selectattr('estado_awx','defined')
             | selectattr('estado_awx','equalto','ERROR')
             | list
             | length
           }}
 
-    - name: Total hosts ejecutados
+    - name: Total hosts
       set_fact:
-        total_hosts: "{{ ansible_play_hosts_all | length }}"
+        total_hosts: "{{ hosts_ejecutados | length }}"
 
     - name: Total unreachable
       set_fact:
@@ -122,11 +133,11 @@
             - total_error | int
           }}
 
-    - name: Inicializar lista
+    - name: Inicializar lista servidores
       set_fact:
         servidores_awx: []
 
-    - name: Construir lista
+    - name: Construir lista servidores
       set_fact:
         servidores_awx: >-
           {{
@@ -147,7 +158,7 @@
               }
             ]
           }}
-      loop: "{{ ansible_play_hosts_all }}"
+      loop: "{{ hosts_ejecutados }}"
 
     - name: Mostrar resumen
       debug:
@@ -158,16 +169,6 @@
           - "ERROR={{ total_error }}"
           - "UNREACHABLE={{ total_unreachable }}"
           - "SERVIDORES={{ servidores_awx | length }}"
-
-    - name: Verificar DNS n8n
-      command: getent hosts n8n.presidencia.gob.ar
-      register: dns_result
-      changed_when: false
-      failed_when: false
-
-    - name: Mostrar DNS
-      debug:
-        var: dns_result.stdout
 
     - name: Crear payload
       set_fact:
@@ -181,18 +182,18 @@
             unreachable: "{{ total_unreachable }}"
           servidores: "{{ servidores_awx }}"
 
-    - name: Enviar a n8n por IP
+    - name: Enviar a n8n
       uri:
-        url: "https://172.21.206.41/webhook/awx-auditoria"
+        url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
         method: POST
         body_format: json
         validate_certs: false
-        timeout: 60
         return_content: true
+        timeout: 60
         body: "{{ payload_n8n }}"
       register: webhook_result
-      failed_when: false
 
     - name: Resultado webhook
       debug:
-        var: webhook_result
+        var: webhook_result.status
+``
