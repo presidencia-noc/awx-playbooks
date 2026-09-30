@@ -108,7 +108,7 @@
             | length
           }}
 
-    - name: Total hosts
+    - name: Total hosts ejecutados
       set_fact:
         total_hosts: "{{ ansible_play_hosts_all | length }}"
 
@@ -181,9 +181,9 @@
             unreachable: "{{ total_unreachable }}"
           servidores: "{{ servidores_awx }}"
 
-    - name: Enviar a n8n
+    - name: Enviar a n8n por IP
       uri:
-        url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
+        url: "https://172.21.206.41/webhook/awx-auditoria"
         method: POST
         body_format: json
         validate_certs: false
