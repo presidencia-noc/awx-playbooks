@@ -1,14 +1,25 @@
-- name: Prueba webhook simple
-  uri:
-    url: "https://n8n.presidencia.gob.ar/webhook-test/awx-auditoria"
-    method: POST
-    body_format: json
-    validate_certs: false
-    return_content: true
-    body:
-      prueba: "awx"
-  register: test_webhook
+---
+- name: Prueba webhook n8n desde AWX
+  hosts: localhost
+  gather_facts: false
 
-- name: Ver respuesta webhook
-  debug:
-    var: test_webhook
+  tasks:
+
+    - name: Enviar prueba a n8n
+      uri:
+        url: "https://n8n.presidencia.gob.ar/webhook-test/awx-auditoria"
+        method: POST
+        body_format: json
+        validate_certs: false
+        return_content: true
+        body:
+          host: "awx-test"
+          ip: "127.0.0.1"
+          os: "AWX"
+          estado: "OK"
+
+      register: webhook_result
+
+    - name: Mostrar respuesta
+      debug:
+        var: webhook_result
