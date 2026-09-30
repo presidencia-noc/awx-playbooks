@@ -185,7 +185,7 @@
             error: "{{ total_error }}"
             unreachable: "{{ total_unreachable }}"
 
-          servidores: "{{ servidores_awx }}"
+          servidores: {{ servidores_awx }}
 
       register: webhook_result
 
