@@ -1,13 +1,12 @@
 ---
 ########################################################################
-# AUDITORIA DE SERVIDORES LINUX
+# PLAY 1 - AUDITORIA
 ########################################################################
 
 - name: Auditoria General Linux para Reporte N8N
   hosts: all
   become: true
   gather_facts: false
-  serial: 1
   ignore_unreachable: true
 
   tasks:
@@ -21,10 +20,10 @@
 
     - block:
 
-        - name: Recolectar Facts del Sistema
+        - name: Recolectar Facts
           setup:
 
-        - name: Validar Distribucion Debian Ubuntu
+        - name: Validar Debian Ubuntu
           set_fact:
             estado_awx: "ERROR"
             motivo_awx: "SO no soportado (No es Debian/Ubuntu)"
@@ -33,7 +32,7 @@
 
         - block:
 
-            - name: Host accesible y validado
+            - name: Marcar host OK
               set_fact:
                 estado_awx: "OK"
                 motivo_awx: "Operativo"
@@ -42,7 +41,7 @@
               command: apt-get update
               changed_when: false
 
-            - name: Detectar actualizaciones pendientes
+            - name: Detectar actualizaciones
               shell: |
                 apt-get --simulate dist-upgrade 2>/dev/null | grep '^Inst ' || true
               register: updates_preview
@@ -58,7 +57,7 @@
                 path: /var/run/reboot-required
               register: reboot_required
 
-            - name: Marcar reinicio pendiente
+            - name: Marcar reboot
               set_fact:
                 reboot_pendiente: "Sí"
                 estado_awx: "REBOOT"
@@ -77,63 +76,58 @@
             motivo_awx: "{{ ansible_failed_result.msg | default('Error desconocido') }}"
 
 ########################################################################
-# CONSOLIDACION Y ENVIO A N8N
+# PLAY 2 - CONSOLIDACION FINAL
 ########################################################################
 
-    - name: Inicializar lista de servidores
-      set_fact:
-        servidores_awx: []
-      run_once: true
-      delegate_to: localhost
+- name: Enviar Reporte Final a N8N
+  hosts: localhost
+  gather_facts: false
 
-    - name: Agregar hosts ejecutados al payload
-      set_fact:
-        servidores_awx: >-
-          {{
-            servidores_awx +
-            [ {
-              'nombre': item,
-              'ip': hostvars[item].ansible_host | default(item),
-              'sistema_operativo': hostvars[item].ansible_distribution | default('N/D'),
-              'version': hostvars[item].ansible_distribution_version | default('N/D'),
-              'kernel': hostvars[item].ansible_kernel | default('N/D'),
-              'updates_pendientes': hostvars[item].updates_count | default(0) | int,
-              'reboot_pendiente': hostvars[item].reboot_pendiente | default('No'),
-              'estado': hostvars[item].estado_awx | default('UNREACHABLE'),
-              'detalles': hostvars[item].motivo_awx | default('')
-            } ]
-          }}
-      loop: "{{ ansible_play_hosts_all }}"
-      run_once: true
-      delegate_to: localhost
+  vars:
 
-    - name: Mostrar payload final
+    servidores_awx: |
+      [
+      {% for item in groups['all'] %}
+      {
+        "nombre": "{{ item }}",
+        "ip": "{{ hostvars[item].ansible_host | default(item) }}",
+        "sistema_operativo": "{{ hostvars[item].ansible_distribution | default('N/D') }}",
+        "version": "{{ hostvars[item].ansible_distribution_version | default('N/D') }}",
+        "kernel": "{{ hostvars[item].ansible_kernel | default('N/D') }}",
+        "updates_pendientes": {{ hostvars[item].updates_count | default(0) | int }},
+        "reboot_pendiente": "{{ hostvars[item].reboot_pendiente | default('No') }}",
+        "estado": "{{ hostvars[item].estado_awx | default('UNREACHABLE') }}",
+        "detalles": "{{ hostvars[item].motivo_awx | default('') }}"
+      }{% if not loop.last %},{% endif %}
+      {% endfor %}
+      ]
+
+  tasks:
+
+    - name: Convertir JSON
+      set_fact:
+        servidores_finales: "{{ servidores_awx | from_json }}"
+
+    - name: Mostrar payload
       debug:
-        var: servidores_awx
-      run_once: true
-      delegate_to: localhost
+        var: servidores_finales
 
-    - name: Enviar Datos a N8N
+    - name: Enviar Webhook N8N
       uri:
         url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
         method: POST
         body_format: json
         validate_certs: false
-        timeout: 45
+        timeout: 60
         return_content: true
         body:
           fecha_auditoria: "{{ lookup('pipe', 'date +%Y-%m-%d_%H:%M:%S') }}"
-          servidores: "{{ servidores_awx }}"
+          servidores: "{{ servidores_finales }}"
       register: webhook_result
       failed_when: false
-      run_once: true
-      delegate_to: localhost
-      become: false
 
-    - name: Mostrar respuesta webhook
+    - name: Resultado webhook
       debug:
         msg:
           - "HTTP {{ webhook_result.status | default('SIN_RESPUESTA') }}"
           - "{{ webhook_result.content | default('SIN_CONTENIDO') }}"
-      run_once: true
-      delegate_to: localhost
