@@ -1,25 +1,59 @@
-- name: Mostrar payload final
-  debug:
-    msg:
-      fecha_auditoria: "{{ lookup('pipe', 'date +%Y-%m-%d_%H:%M:%S') }}"
-      servidores: "{{ servidores_awx }}"
+########################################################################
+# CONSOLIDACION Y ENVIO A N8N
+########################################################################
 
-        - name: Enviar webhook a N8N
+    - name: Consolidar y Enviar Webhook
+      run_once: true
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
+
+      block:
+
+        - name: Inicializar lista de servidores
+          set_fact:
+            servidores_awx: []
+
+        - name: Agregar hosts ejecutados
+          set_fact:
+            servidores_awx: >-
+              {{
+                servidores_awx +
+                [ {
+                  'nombre': item,
+                  'ip': hostvars[item].ansible_host | default(item),
+                  'sistema_operativo': hostvars[item].ansible_distribution | default('N/D'),
+                  'version': hostvars[item].ansible_distribution_version | default('N/D'),
+                  'kernel': hostvars[item].ansible_kernel | default('N/D'),
+                  'updates_pendientes': hostvars[item].updates_count | default(0) | int,
+                  'reboot_pendiente': hostvars[item].reboot_pendiente | default('No'),
+                  'estado': hostvars[item].estado_awx | default('UNREACHABLE'),
+                  'detalles': hostvars[item].motivo_awx | default('')
+                } ]
+              }}
+          loop: "{{ ansible_play_hosts_all }}"
+
+        - name: Mostrar payload final
+          debug:
+            var: servidores_awx
+
+        - name: Enviar Datos a N8N
           uri:
             url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
             method: POST
             body_format: json
             validate_certs: false
-            return_content: true
             timeout: 45
+            return_content: true
             body:
               fecha_auditoria: "{{ lookup('pipe', 'date +%Y-%m-%d_%H:%M:%S') }}"
               servidores: "{{ servidores_awx }}"
           register: webhook_result
           failed_when: false
 
-        - name: Resultado webhook
+        - name: Mostrar respuesta webhook
           debug:
             msg:
-              - "HTTP: {{ webhook_result.status | default('Sin respuesta') }}"
-              - "Contenido: {{ webhook_result.content | default('Sin contenido') }}"
+              - "HTTP {{ webhook_result.status | default('SIN_RESPUESTA') }}"
+              - "{{ webhook_result.content | default('SIN_CONTENIDO') }}"
