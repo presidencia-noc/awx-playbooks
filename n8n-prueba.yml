@@ -1,0 +1,14 @@
+- name: Prueba webhook simple
+  uri:
+    url: "https://n8n.presidencia.gob.ar/webhook-test/awx-auditoria"
+    method: POST
+    body_format: json
+    validate_certs: false
+    return_content: true
+    body:
+      prueba: "awx"
+  register: test_webhook
+
+- name: Ver respuesta webhook
+  debug:
+    var: test_webhook
