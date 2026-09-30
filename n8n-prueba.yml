@@ -1,11 +1,12 @@
 ---
 - name: Prueba webhook n8n desde AWX
-  hosts: localhost
+  hosts: all
   gather_facts: false
 
   tasks:
 
     - name: Enviar prueba a n8n
+      delegate_to: localhost
       uri:
         url: "https://n8n.presidencia.gob.ar/webhook-test/awx-auditoria"
         method: POST
