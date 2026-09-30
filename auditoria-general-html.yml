@@ -1,15 +1,81 @@
-########################################################################
-# CONSOLIDACIÓN Y ENVÍO A N8N
-########################################################################
-
-- name: Consolidar resultados y enviar a n8n
+---
+- name: Auditoria Linux y envio a n8n
   hosts: all
+  become: true
   gather_facts: false
-  run_once: true
+  serial: 1
+  ignore_unreachable: true
 
   tasks:
 
-    - name: Calcular hosts OK
+    - name: Inicializar estado
+      set_fact:
+        estado_awx: "UNREACHABLE"
+        motivo_awx: "Host no accesible"
+        updates_count: 0
+        cacheable: true
+
+    - block:
+
+        - name: Recolectar facts
+          setup:
+
+        - name: Marcar host accesible
+          set_fact:
+            estado_awx: "OK"
+            motivo_awx: ""
+            cacheable: true
+
+        - name: Validar Debian
+          meta: end_host
+          when:
+            - ansible_os_family is defined
+            - ansible_os_family != "Debian"
+
+        - name: Actualizar cache apt
+          shell: apt-get update
+          changed_when: false
+
+        - name: Detectar actualizaciones pendientes
+          shell: |
+            apt-get --simulate dist-upgrade 2>/dev/null | grep '^Inst ' || true
+          register: updates_preview
+          changed_when: false
+          failed_when: false
+
+        - name: Contar actualizaciones
+          set_fact:
+            updates_count: "{{ updates_preview.stdout_lines | length }}"
+            cacheable: true
+
+        - name: Detectar reboot requerido
+          stat:
+            path: /var/run/reboot-required
+          register: reboot_required
+
+        - name: Marcar reboot
+          set_fact:
+            estado_awx: "REBOOT"
+            motivo_awx: "Reinicio pendiente"
+            cacheable: true
+          when:
+            - reboot_required.stat.exists | default(false)
+
+      rescue:
+
+        - name: Registrar error
+          set_fact:
+            estado_awx: "ERROR"
+            motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
+            cacheable: true
+
+    ####################################################################
+    # CONSOLIDACION
+    ####################################################################
+
+    - name: Total OK
+      run_once: true
+      delegate_to: localhost
       set_fact:
         total_ok: >-
           {{
@@ -21,7 +87,9 @@
             | length
           }}
 
-    - name: Calcular hosts REBOOT
+    - name: Total REBOOT
+      run_once: true
+      delegate_to: localhost
       set_fact:
         total_reboot: >-
           {{
@@ -33,7 +101,9 @@
             | length
           }}
 
-    - name: Calcular hosts ERROR
+    - name: Total ERROR
+      run_once: true
+      delegate_to: localhost
       set_fact:
         total_error: >-
           {{
@@ -45,11 +115,15 @@
             | length
           }}
 
-    - name: Calcular total hosts
+    - name: Total hosts
+      run_once: true
+      delegate_to: localhost
       set_fact:
         total_hosts: "{{ groups['all'] | length }}"
 
-    - name: Calcular hosts UNREACHABLE
+    - name: Total unreachable
+      run_once: true
+      delegate_to: localhost
       set_fact:
         total_unreachable: >-
           {{
@@ -59,61 +133,68 @@
             - total_error | int
           }}
 
-    - name: Inicializar lista servidores
-      set_fact:
-        servidores_awx: []
-
-    - name: Agregar servidores
+    - name: Construir lista servidores
+      run_once: true
+      delegate_to: localhost
       set_fact:
         servidores_awx: >-
-          {{
-            servidores_awx +
-            [
-              {
-                'host': item,
-                'ip': hostvars[item].ansible_host | default('N/D'),
-                'os': (
-                  hostvars[item].ansible_distribution | default('N/D')
-                ) ~ ' ' ~ (
-                  hostvars[item].ansible_distribution_version | default('')
-                ),
-                'kernel': hostvars[item].ansible_kernel | default('N/D'),
-                'updates': hostvars[item].updates_count | default(0),
-                'estado': hostvars[item].estado_awx | default('UNREACHABLE'),
-                'motivo': hostvars[item].motivo_awx | default('')
-              }
-            ]
-          }}
-      loop: "{{ groups['all'] }}"
+          {%- set lista = [] -%}
+          {%- for host in groups['all'] -%}
+          {%- set _ = lista.append({
+            'host': host,
+            'ip': hostvars[host].ansible_host | default('N/D'),
+            'os': (
+              hostvars[host].ansible_distribution | default('N/D')
+            ) ~ ' ' ~ (
+              hostvars[host].ansible_distribution_version | default('')
+            ),
+            'kernel': hostvars[host].ansible_kernel | default('N/D'),
+            'updates': hostvars[host].updates_count | default(0),
+            'estado': hostvars[host].estado_awx | default('UNREACHABLE'),
+            'motivo': hostvars[host].motivo_awx | default('')
+          }) -%}
+          {%- endfor -%}
+          {{ lista }}
 
     - name: Mostrar resumen
+      run_once: true
+      delegate_to: localhost
       debug:
         msg:
           - "TOTAL HOSTS={{ total_hosts }}"
+          - "OK={{ total_ok }}"
+          - "REBOOT={{ total_reboot }}"
+          - "ERROR={{ total_error }}"
+          - "UNREACHABLE={{ total_unreachable }}"
           - "SERVIDORES={{ servidores_awx | length }}"
 
     - name: Enviar a n8n
+      run_once: true
+      delegate_to: localhost
       uri:
         url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
         method: POST
         body_format: json
         validate_certs: false
         return_content: true
+        timeout: 60
 
         body:
           fecha: "{{ lookup('pipe','date +%F_%T') }}"
 
           resumen:
-            total_hosts: "{{ total_hosts }}"
-            ok: "{{ total_ok }}"
-            reboot: "{{ total_reboot }}"
-            error: "{{ total_error }}"
-            unreachable: "{{ total_unreachable }}"
+            total_hosts: "{{ total_hosts | int }}"
+            ok: "{{ total_ok | int }}"
+            reboot: "{{ total_reboot | int }}"
+            error: "{{ total_error | int }}"
+            unreachable: "{{ total_unreachable | int }}"
 
-          servidores: "{{ servidores_awx }}"
+          servidores: "{{ servidores_awx | from_yaml }}"
 
       register: webhook_result
 
-    - name: Ver respuesta
+    - name: Mostrar respuesta webhook
+      run_once: true
+      delegate_to: localhost
       debug:
-        var: webhook_result
+        var: webhook_result.status
