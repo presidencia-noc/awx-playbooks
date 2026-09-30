@@ -245,3 +245,16 @@
         msg:
           - "Reporte generado correctamente"
           - "Archivo: {{ reporte_html }}"
+          - name: Enviar resultados a n8n
+  delegate_to: localhost
+
+  uri:
+    url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
+    method: POST
+    body_format: json
+
+    body:
+      host: "{{ inventory_hostname }}"
+      ip: "{{ ansible_default_ipv4.address }}"
+      os: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+      estado: "{{ update_status }}"
