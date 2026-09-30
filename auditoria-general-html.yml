@@ -1,76 +1,11 @@
----
-- name: Auditoria Linux
-  hosts: all
-  become: true
-  gather_facts: false
-  serial: 1
-  ignore_unreachable: true
-
-  tasks:
-
-    - name: Inicializar estado
-      set_fact:
-        estado_awx: "UNREACHABLE"
-        motivo_awx: "Host no accesible"
-        updates_count: 0
-
-    - block:
-
-        - name: Recolectar facts
-          setup:
-
-        - name: Inicializar host accesible
-          set_fact:
-            estado_awx: "OK"
-            motivo_awx: ""
-
-        - name: Validar Debian Ubuntu
-          meta: end_host
-          when:
-            - ansible_os_family is defined
-            - ansible_os_family != "Debian"
-
-        - name: Actualizar cache APT
-          shell: apt-get update
-          changed_when: false
-
-        - name: Detectar actualizaciones pendientes
-          shell: |
-            apt-get --simulate dist-upgrade 2>/dev/null | grep '^Inst ' || true
-          register: updates_preview
-          changed_when: false
-          failed_when: false
-
-        - name: Contar actualizaciones
-          set_fact:
-            updates_count: "{{ updates_preview.stdout_lines | length }}"
-
-        - name: Detectar reboot requerido
-          stat:
-            path: /var/run/reboot-required
-          register: reboot_required
-
-        - name: Marcar reinicio requerido
-          set_fact:
-            estado_awx: "REBOOT"
-            motivo_awx: "Reinicio pendiente"
-          when:
-            - reboot_required.stat.exists | default(false)
-
-      rescue:
-
-        - name: Registrar error
-          set_fact:
-            estado_awx: "ERROR"
-            motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
-
 ########################################################################
 # CONSOLIDACIÓN Y ENVÍO A N8N
 ########################################################################
 
 - name: Consolidar resultados y enviar a n8n
-  hosts: localhost
+  hosts: all
   gather_facts: false
+  run_once: true
 
   tasks:
 
@@ -124,11 +59,11 @@
             - total_error | int
           }}
 
-    - name: Inicializar lista de servidores
+    - name: Inicializar lista servidores
       set_fact:
         servidores_awx: []
 
-    - name: Agregar servidores al JSON
+    - name: Agregar servidores
       set_fact:
         servidores_awx: >-
           {{
@@ -154,17 +89,10 @@
     - name: Mostrar resumen
       debug:
         msg:
-          - "==============================================="
-          - "AUDITORIA LINUX"
-          - "==============================================="
-          - "TOTAL HOSTS : {{ total_hosts }}"
-          - "OK          : {{ total_ok }}"
-          - "REBOOT      : {{ total_reboot }}"
-          - "ERROR       : {{ total_error }}"
-          - "UNREACHABLE : {{ total_unreachable }}"
-          - "==============================================="
+          - "TOTAL HOSTS={{ total_hosts }}"
+          - "SERVIDORES={{ servidores_awx | length }}"
 
-    - name: Enviar resultado consolidado a n8n
+    - name: Enviar a n8n
       uri:
         url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
         method: POST
@@ -176,16 +104,16 @@
           fecha: "{{ lookup('pipe','date +%F_%T') }}"
 
           resumen:
-            total_hosts: "{{ total_hosts | int }}"
-            ok: "{{ total_ok | int }}"
-            reboot: "{{ total_reboot | int }}"
-            error: "{{ total_error | int }}"
-            unreachable: "{{ total_unreachable | int }}"
+            total_hosts: "{{ total_hosts }}"
+            ok: "{{ total_ok }}"
+            reboot: "{{ total_reboot }}"
+            error: "{{ total_error }}"
+            unreachable: "{{ total_unreachable }}"
 
           servidores: "{{ servidores_awx }}"
 
       register: webhook_result
 
-    - name: Mostrar respuesta webhook
+    - name: Ver respuesta
       debug:
-        var: webhook_result.status
+        var: webhook_result
