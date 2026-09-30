@@ -3,7 +3,7 @@
 # AUDITORIA
 ########################################################################
 
-- name: Auditoria Linux
+- name: Auditoria Linux y Envio Centralizado
   hosts: all
   become: true
   gather_facts: false
@@ -68,78 +68,82 @@
             motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado en la ejecución') }}"
 
 ########################################################################
-# CONSOLIDACION Y ENVIO A N8N
+# CONSOLIDACION Y ENVIO A N8N (Unificado dentro del mismo Play)
 ########################################################################
 
-- name: Consolidar resultados y enviar a n8n
-  hosts: localhost
-  gather_facts: false
-  become: false
+    - name: Procesar y enviar resultados a N8N
+      block:
+        - name: Definir hosts ejecutados del inventario
+          set_fact:
+            hosts_ejecutados: "{{ groups['all'] | difference(['localhost', '127.0.0.1']) }}"
 
-  tasks:
-    - name: Definir hosts ejecutados
-      set_fact:
-        hosts_ejecutados: "{{ groups['all'] | difference(['localhost']) }}"
+        - name: Calcular Totales de Estados
+          set_fact:
+            total_ok: "{{ hosts_ejecutados | map('extract', hostvars) | selectattr('estado_awx', 'defined') | selectattr('estado_awx', '==', 'OK') | list | length }}"
+            total_reboot: "{{ hosts_ejecutados | map('extract', hostvars) | selectattr('estado_awx', 'defined') | selectattr('estado_awx', '==', 'REBOOT') | list | length }}"
+            total_error: "{{ hosts_ejecutados | map('extract', hostvars) | selectattr('estado_awx', 'defined') | selectattr('estado_awx', '==', 'ERROR') | list | length }}"
+            total_hosts: "{{ hosts_ejecutados | length }}"
 
-    - name: Calcular Totales de Estados
-      set_fact:
-        total_ok: "{{ hosts_ejecutados | map('extract', hostvars) | selectattr('estado_awx', 'defined') | selectattr('estado_awx', '==', 'OK') | list | length }}"
-        total_reboot: "{{ hosts_ejecutados | map('extract', hostvars) | selectattr('estado_awx', 'defined') | selectattr('estado_awx', '==', 'REBOOT') | list | length }}"
-        total_error: "{{ hosts_ejecutados | map('extract', hostvars) | selectattr('estado_awx', 'defined') | selectattr('estado_awx', '==', 'ERROR') | list | length }}"
-        total_hosts: "{{ hosts_ejecutados | length }}"
+        - name: Total unreachable
+          set_fact:
+            total_unreachable: "{{ total_hosts | int - total_ok | int - total_reboot | int - total_error | int }}"
 
-    - name: Total unreachable
-      set_fact:
-        total_unreachable: "{{ total_hosts | int - total_ok | int - total_reboot | int - total_error | int }}"
+        - name: Construir JSON de servidores eficientemente
+          set_fact:
+            servidores_awx: >-
+              {% set lista = [] %}
+              {% for item in hosts_ejecutados %}
+                {% set hvar = hostvars[item] %}
+                {% set estado = hvar.estado_awx | default('UNREACHABLE') %}
+                {% set info_os = (hvar.ansible_distribution | default('N/D')) ~ ' ' ~ (hvar.ansible_distribution_version | default('')) %}
+                {% set _ = lista.append({
+                  'host': item,
+                  'ip': hvar.ansible_host | default(item),
+                  'os': info_os if estado != 'UNREACHABLE' else 'N/D',
+                  'kernel': hvar.ansible_kernel | default('N/D'),
+                  'updates': hvar.updates_count | default(0) | int,
+                  'estado': estado,
+                  'motivo': hvar.motivo_awx | default('') if estado != 'OK' else ''
+                }) %}
+              {% endfor %}
+              {{ lista }}
 
-    - name: Construir JSON de servidores eficientemente
-      set_fact:
-        servidores_awx: >-
-          {% set lista = [] %}
-          {% for item in hosts_ejecutados %}
-            {% set hvar = hostvars[item] %}
-            {% set estado = hvar.estado_awx | default('UNREACHABLE') %}
-            {% set info_os = (hvar.ansible_distribution | default('N/D')) ~ ' ' ~ (hvar.ansible_distribution_version | default('')) %}
-            {% set _ = lista.append({
-              'host': item,
-              'ip': hvar.ansible_host | default(item),
-              'os': info_os if estado != 'UNREACHABLE' else 'N/D',
-              'kernel': hvar.ansible_kernel | default('N/D'),
-              'updates': hvar.updates_count | default(0) | int,
-              'estado': estado,
-              'motivo': hvar.motivo_awx | default('') if estado != 'OK' else ''
-            }) %}
-          {% endfor %}
-          {{ lista }}
+        - name: Mostrar resumen en logs de AWX
+          debug:
+            msg:
+              - "TOTAL HOSTS={{ total_hosts }}"
+              - "OK={{ total_ok }}"
+              - "REBOOT={{ total_reboot }}"
+              - "ERROR={{ total_error }}"
+              - "UNREACHABLE={{ total_unreachable }}"
 
-    - name: Mostrar resumen en logs de AWX
-      debug:
-        msg:
-          - "TOTAL HOSTS={{ total_hosts }}"
-          - "OK={{ total_ok }}"
-          - "REBOOT={{ total_reboot }}"
-          - "ERROR={{ total_error }}"
-          - "UNREACHABLE={{ total_unreachable }}"
+        - name: Enviar Payload a N8N
+          uri:
+            url: "https://presidencia.gob.ar"
+            method: POST
+            body_format: json
+            validate_certs: false
+            return_content: true
+            status_code: [200, 201, 202]
+            timeout: 30
+            body:
+              fecha: "{{ lookup('pipe', 'date +%Y-%m-%d_%H:%M:%S') }}"
+              resumen:
+                total_hosts: "{{ total_hosts | int }}"
+                ok: "{{ total_ok | int }}"
+                reboot: "{{ total_reboot | int }}"
+                error: "{{ total_error | int }}"
+                unreachable: "{{ total_unreachable | int }}"
+              servidores: "{{ servidores_awx }}"
+          register: webhook_result
 
-    - name: Enviar Payload a N8N
-      uri:
-        url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
-        method: POST
-        body_format: json
-        validate_certs: false
-        return_content: true
-        timeout: 60
-        body:
-          fecha: "{{ lookup('pipe', 'date +%Y-%m-%d_%H:%M:%S') }}"
-          resumen:
-            total_hosts: "{{ total_hosts | int }}"
-            ok: "{{ total_ok | int }}"
-            reboot: "{{ total_reboot | int }}"
-            error: "{{ total_error | int }}"
-            unreachable: "{{ total_unreachable | int }}"
-          servidores: "{{ servidores_awx }}"
-      register: webhook_result
+        - name: Imprimir respuesta explícita del Webhook
+          debug:
+            var: webhook_result
 
-    - name: Resultado webhook
-      debug:
-        var: webhook_result.status
+      # ESTAS LÍNEAS SON LAS CRÍTICAS PARA AWX:
+      run_once: true
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
