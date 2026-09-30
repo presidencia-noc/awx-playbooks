@@ -150,7 +150,7 @@
 
     - name: Enviar a n8n
       uri:
-        url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
+        url: "https://n8n.presidencia.gob.ar/webhook-test/awx-auditoria"
         method: POST
         body_format: json
         validate_certs: false
