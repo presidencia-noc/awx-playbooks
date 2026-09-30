@@ -1,5 +1,5 @@
 ---
-- name: Actualizacion Linux y Reporte Consolidado
+- name: Auditoria Linux
   hosts: all
   become: true
   gather_facts: false
@@ -8,24 +8,23 @@
 
   tasks:
 
-    - name: Inicializar variables
+    - name: Inicializar estado
       set_fact:
         estado_awx: "UNREACHABLE"
-        motivo_awx: "Host no procesado"
-        updates_count: "N/D"
+        motivo_awx: "Host no accesible"
+        updates_count: 0
 
     - block:
 
         - name: Recolectar facts
           setup:
 
-        - name: Inicializar estado host accesible
+        - name: Inicializar host accesible
           set_fact:
             estado_awx: "OK"
             motivo_awx: ""
-            updates_count: 0
 
-        - name: Omitir sistemas que no utilizan APT
+        - name: Validar Debian
           meta: end_host
           when:
             - ansible_os_family is defined
@@ -33,10 +32,9 @@
 
         - name: Actualizar cache
           shell: apt-get update
-          register: apt_update
           changed_when: false
 
-        - name: Obtener vista previa
+        - name: Detectar actualizaciones pendientes
           shell: |
             apt-get --simulate dist-upgrade 2>/dev/null | grep '^Inst ' || true
           register: updates_preview
@@ -47,22 +45,7 @@
           set_fact:
             updates_count: "{{ updates_preview.stdout_lines | length }}"
 
-        - name: Ejecutar actualizacion
-          shell: |
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get -y dist-upgrade
-          register: upgrade_result
-          when: updates_count | int > 0
-
-        - name: Autoremove
-          shell: apt-get -y autoremove
-          when: updates_count | int > 0
-
-        - name: Autoclean
-          shell: apt-get -y autoclean
-          when: updates_count | int > 0
-
-        - name: Verificar reinicio requerido
+        - name: Detectar reboot requerido
           stat:
             path: /var/run/reboot-required
           register: reboot_required
@@ -81,180 +64,90 @@
             estado_awx: "ERROR"
             motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
 
-##########################################################
-# REPORTE HTML
-##########################################################
+########################################################################
+# RESUMEN Y WEBHOOK
+########################################################################
 
-- name: Generar Reporte HTML
+- name: Generar resumen y enviar a n8n
   hosts: localhost
   gather_facts: false
 
   vars:
-    reporte_html: "/tmp/reporte_actualizaciones_linux.html"
+
+    total_ok: >-
+      {{
+        groups['all']
+        | map('extract', hostvars)
+        | selectattr('estado_awx','defined')
+        | selectattr('estado_awx','equalto','OK')
+        | list
+        | length
+      }}
+
+    total_reboot: >-
+      {{
+        groups['all']
+        | map('extract', hostvars)
+        | selectattr('estado_awx','defined')
+        | selectattr('estado_awx','equalto','REBOOT')
+        | list
+        | length
+      }}
+
+    total_error: >-
+      {{
+        groups['all']
+        | map('extract', hostvars)
+        | selectattr('estado_awx','defined')
+        | selectattr('estado_awx','equalto','ERROR')
+        | list
+        | length
+      }}
+
+    total_hosts: "{{ groups['all'] | length }}"
+
+    total_unreachable: >-
+      {{
+        total_hosts | int
+        - total_ok | int
+        - total_reboot | int
+        - total_error | int
+      }}
 
   tasks:
 
-    - name: Crear reporte HTML
-      copy:
-        dest: "{{ reporte_html }}"
-        content: |
+    - name: Enviar resultado consolidado a n8n
+      uri:
+        url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
+        method: POST
+        body_format: json
+        validate_certs: false
 
-          <html>
-          <head>
-          <meta charset="utf-8">
+        body:
 
-          <style>
+          fecha: "{{ lookup('pipe', 'date +%F_%T') }}"
 
-          body {
-              font-family: Arial, Helvetica, sans-serif;
-              margin: 20px;
-          }
+          resumen:
 
-          h1 {
-              color: #1f4e79;
-          }
+            total_hosts: "{{ total_hosts }}"
+            ok: "{{ total_ok }}"
+            reboot: "{{ total_reboot }}"
+            error: "{{ total_error }}"
+            unreachable: "{{ total_unreachable }}"
 
-          table {
-              border-collapse: collapse;
-              width: 100%;
-          }
+          servidores:
+            {% for host in groups['all'] %}
+            - host: "{{ host }}"
+              ip: "{{ hostvars[host].ansible_host | default('N/D') }}"
+              os: "{{ hostvars[host].ansible_distribution | default('N/D') }} {{ hostvars[host].ansible_distribution_version | default('') }}"
+              kernel: "{{ hostvars[host].ansible_kernel | default('N/D') }}"
+              updates: "{{ hostvars[host].updates_count | default(0) }}"
+              estado: "{{ hostvars[host].estado_awx | default('UNREACHABLE') }}"
+              motivo: "{{ hostvars[host].motivo_awx | default('') }}"
+            {% endfor %}
 
-          th {
-              background: #1f4e79;
-              color: white;
-              padding: 8px;
-          }
+      register: webhook_result
 
-          td {
-              border: 1px solid #cccccc;
-              padding: 8px;
-          }
-
-          .ok {
-              background: #d4edda;
-          }
-
-          .reboot {
-              background: #fff3cd;
-          }
-
-          .error {
-              background: #f8d7da;
-          }
-
-          .unreachable {
-              background: #ffb3b3;
-          }
-
-          </style>
-
-          </head>
-
-          <body>
-
-          <h1>Reporte de Actualizaciones Linux</h1>
-
-          <p>
-          Fecha:
-          {{ lookup('pipe','date "+%Y-%m-%d %H:%M:%S"') }}
-          </p>
-
-          <table>
-
-          <tr>
-              <th>Hostname</th>
-              <th>IP</th>
-              <th>Sistema</th>
-              <th>Versión</th>
-              <th>Kernel</th>
-              <th>Python</th>
-              <th>Actualizaciones</th>
-              <th>Estado</th>
-              <th>Motivo</th>
-          </tr>
-
-          {% for host in groups['all'] %}
-
-          <tr>
-
-              <td>{{ host }}</td>
-
-              <td>
-              {{ hostvars.get(host, {}).get('ansible_host', 'N/D') }}
-              </td>
-
-              <td>
-              {{ hostvars.get(host, {}).get('ansible_distribution', 'N/D') }}
-              </td>
-
-              <td>
-              {{ hostvars.get(host, {}).get('ansible_distribution_version', 'N/D') }}
-              </td>
-
-              <td>
-              {{ hostvars.get(host, {}).get('ansible_kernel', 'N/D') }}
-              </td>
-
-              <td>
-              {{ hostvars.get(host, {}).get('ansible_python_version', 'N/D') }}
-              </td>
-
-              <td>
-              {{ hostvars.get(host, {}).get('updates_count', 'N/D') }}
-              </td>
-
-              {% if hostvars.get(host, {}).get('estado_awx') == 'OK' %}
-
-                <td class="ok">OK</td>
-                <td></td>
-
-              {% elif hostvars.get(host, {}).get('estado_awx') == 'REBOOT' %}
-
-                <td class="reboot">REBOOT</td>
-                <td>
-                  {{ hostvars.get(host, {}).get('motivo_awx', '') }}
-                </td>
-
-              {% elif hostvars.get(host, {}).get('estado_awx') == 'ERROR' %}
-
-                <td class="error">ERROR</td>
-                <td>
-                  {{ hostvars.get(host, {}).get('motivo_awx', '') }}
-                </td>
-
-              {% else %}
-
-                <td class="unreachable">UNREACHABLE</td>
-                <td>
-                  No fue posible obtener facts o conectar por SSH
-                </td>
-
-              {% endif %}
-
-          </tr>
-
-          {% endfor %}
-
-          </table>
-
-          </body>
-          </html>
-
-    - name: Mostrar ubicacion del reporte
+    - name: Mostrar respuesta webhook
       debug:
-        msg:
-          - "Reporte generado correctamente"
-          - "Archivo: {{ reporte_html }}"
-          - name: Enviar resultados a n8n
-  delegate_to: localhost
-
-  uri:
-    url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
-    method: POST
-    body_format: json
-
-    body:
-      host: "{{ inventory_hostname }}"
-      ip: "{{ ansible_default_ipv4.address }}"
-      os: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
-      estado: "{{ update_status }}"
+        var: webhook_result.status
