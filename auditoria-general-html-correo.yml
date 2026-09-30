@@ -164,7 +164,7 @@
           - "MOTIVO    : {{ hostvars.get(item, {}).get('motivo_awx', '') }}"
           - "--------------------------------------------------"
       loop: "{{ groups['all'] }}"
-      - name: Enviar resultados a n8n
+    - name: Enviar resultados a n8n
   delegate_to: localhost
 
   uri:
