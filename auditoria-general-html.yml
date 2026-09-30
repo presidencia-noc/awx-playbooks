@@ -13,7 +13,6 @@
         estado_awx: "UNREACHABLE"
         motivo_awx: "Host no accesible"
         updates_count: 0
-        cacheable: true
 
     - block:
 
@@ -24,7 +23,6 @@
           set_fact:
             estado_awx: "OK"
             motivo_awx: ""
-            cacheable: true
 
         - name: Validar Debian
           meta: end_host
@@ -46,7 +44,6 @@
         - name: Contar actualizaciones
           set_fact:
             updates_count: "{{ updates_preview.stdout_lines | length }}"
-            cacheable: true
 
         - name: Detectar reboot requerido
           stat:
@@ -57,7 +54,6 @@
           set_fact:
             estado_awx: "REBOOT"
             motivo_awx: "Reinicio pendiente"
-            cacheable: true
           when:
             - reboot_required.stat.exists | default(false)
 
@@ -67,14 +63,14 @@
           set_fact:
             estado_awx: "ERROR"
             motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
-            cacheable: true
 
-    ####################################################################
-    # CONSOLIDACION
-    ####################################################################
+########################################################################
+# CONSOLIDACION Y ENVIO A N8N
+########################################################################
 
     - name: Total OK
       run_once: true
+      become: false
       delegate_to: localhost
       set_fact:
         total_ok: >-
@@ -89,6 +85,7 @@
 
     - name: Total REBOOT
       run_once: true
+      become: false
       delegate_to: localhost
       set_fact:
         total_reboot: >-
@@ -103,6 +100,7 @@
 
     - name: Total ERROR
       run_once: true
+      become: false
       delegate_to: localhost
       set_fact:
         total_error: >-
@@ -117,12 +115,14 @@
 
     - name: Total hosts
       run_once: true
+      become: false
       delegate_to: localhost
       set_fact:
         total_hosts: "{{ groups['all'] | length }}"
 
     - name: Total unreachable
       run_once: true
+      become: false
       delegate_to: localhost
       set_fact:
         total_unreachable: >-
@@ -135,29 +135,41 @@
 
     - name: Construir lista servidores
       run_once: true
+      become: false
       delegate_to: localhost
       set_fact:
         servidores_awx: >-
-          {%- set lista = [] -%}
-          {%- for host in groups['all'] -%}
-          {%- set _ = lista.append({
-            'host': host,
-            'ip': hostvars[host].ansible_host | default('N/D'),
-            'os': (
-              hostvars[host].ansible_distribution | default('N/D')
-            ) ~ ' ' ~ (
-              hostvars[host].ansible_distribution_version | default('')
-            ),
-            'kernel': hostvars[host].ansible_kernel | default('N/D'),
-            'updates': hostvars[host].updates_count | default(0),
-            'estado': hostvars[host].estado_awx | default('UNREACHABLE'),
-            'motivo': hostvars[host].motivo_awx | default('')
-          }) -%}
-          {%- endfor -%}
-          {{ lista }}
+          {{
+            groups['all']
+            | map('extract', hostvars)
+            | map('combine', {})
+            | list
+          }}
+
+    - name: Crear JSON para n8n
+      run_once: true
+      become: false
+      delegate_to: localhost
+      set_fact:
+        payload_n8n:
+          fecha: "{{ lookup('pipe','date +%F_%T') }}"
+          resumen:
+            total_hosts: "{{ total_hosts }}"
+            ok: "{{ total_ok }}"
+            reboot: "{{ total_reboot }}"
+            error: "{{ total_error }}"
+            unreachable: "{{ total_unreachable }}"
+          servidores: >-
+            {{
+              groups['all']
+              | map('extract', hostvars)
+              | map('combine', {})
+              | list
+            }}
 
     - name: Mostrar resumen
       run_once: true
+      become: false
       delegate_to: localhost
       debug:
         msg:
@@ -166,10 +178,10 @@
           - "REBOOT={{ total_reboot }}"
           - "ERROR={{ total_error }}"
           - "UNREACHABLE={{ total_unreachable }}"
-          - "SERVIDORES={{ servidores_awx | length }}"
 
     - name: Enviar a n8n
       run_once: true
+      become: false
       delegate_to: localhost
       uri:
         url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
@@ -178,23 +190,12 @@
         validate_certs: false
         return_content: true
         timeout: 60
-
-        body:
-          fecha: "{{ lookup('pipe','date +%F_%T') }}"
-
-          resumen:
-            total_hosts: "{{ total_hosts | int }}"
-            ok: "{{ total_ok | int }}"
-            reboot: "{{ total_reboot | int }}"
-            error: "{{ total_error | int }}"
-            unreachable: "{{ total_unreachable | int }}"
-
-          servidores: "{{ servidores_awx | from_yaml }}"
-
+        body: "{{ payload_n8n }}"
       register: webhook_result
 
     - name: Mostrar respuesta webhook
       run_once: true
+      become: false
       delegate_to: localhost
       debug:
         var: webhook_result.status
