@@ -1,5 +1,5 @@
 ---
-- name: Auditoria Linux y envio a n8n
+- name: Auditoria Linux
   hosts: all
   become: true
   gather_facts: false
@@ -19,12 +19,12 @@
         - name: Recolectar facts
           setup:
 
-        - name: Marcar host accesible
+        - name: Host accesible
           set_fact:
             estado_awx: "OK"
             motivo_awx: ""
 
-        - name: Validar Debian Ubuntu
+        - name: Validar Debian
           meta: end_host
           when:
             - ansible_os_family is defined
@@ -34,18 +34,18 @@
           shell: apt-get update
           changed_when: false
 
-        - name: Detectar actualizaciones pendientes
+        - name: Detectar actualizaciones
           shell: |
             apt-get --simulate dist-upgrade 2>/dev/null | grep '^Inst ' || true
           register: updates_preview
           changed_when: false
           failed_when: false
 
-        - name: Contar actualizaciones
+        - name: Contar updates
           set_fact:
             updates_count: "{{ updates_preview.stdout_lines | length }}"
 
-        - name: Detectar reboot requerido
+        - name: Detectar reboot
           stat:
             path: /var/run/reboot-required
           register: reboot_required
@@ -68,62 +68,51 @@
 # CONSOLIDACION
 ########################################################################
 
-    - name: Total OK
-      run_once: true
-      become: false
-      delegate_to: localhost
+- name: Consolidar resultados
+  hosts: "{{ ansible_play_hosts_all[0] }}"
+  gather_facts: false
+  become: false
+
+  tasks:
+
+    - name: Calcular OK
       set_fact:
         total_ok: >-
           {{
-            groups['all']
+            ansible_play_hosts_all
             | map('extract', hostvars)
-            | selectattr('estado_awx','defined')
             | selectattr('estado_awx','equalto','OK')
             | list
             | length
           }}
 
-    - name: Total REBOOT
-      run_once: true
-      become: false
-      delegate_to: localhost
+    - name: Calcular REBOOT
       set_fact:
         total_reboot: >-
           {{
-            groups['all']
+            ansible_play_hosts_all
             | map('extract', hostvars)
-            | selectattr('estado_awx','defined')
             | selectattr('estado_awx','equalto','REBOOT')
             | list
             | length
           }}
 
-    - name: Total ERROR
-      run_once: true
-      become: false
-      delegate_to: localhost
+    - name: Calcular ERROR
       set_fact:
         total_error: >-
           {{
-            groups['all']
+            ansible_play_hosts_all
             | map('extract', hostvars)
-            | selectattr('estado_awx','defined')
             | selectattr('estado_awx','equalto','ERROR')
             | list
             | length
           }}
 
-    - name: Total hosts
-      run_once: true
-      become: false
-      delegate_to: localhost
+    - name: Total hosts ejecutados
       set_fact:
-        total_hosts: "{{ groups['all'] | length }}"
+        total_hosts: "{{ ansible_play_hosts_all | length }}"
 
     - name: Total unreachable
-      run_once: true
-      become: false
-      delegate_to: localhost
       set_fact:
         total_unreachable: >-
           {{
@@ -133,21 +122,16 @@
             - total_error | int
           }}
 
-    - name: Inicializar lista servidores
-      run_once: true
-      become: false
-      delegate_to: localhost
+    - name: Inicializar lista
       set_fact:
         servidores_awx: []
 
-    - name: Construir lista servidores
-      run_once: true
-      become: false
-      delegate_to: localhost
+    - name: Construir lista
       set_fact:
         servidores_awx: >-
           {{
-            servidores_awx + [
+            servidores_awx +
+            [
               {
                 'host': item,
                 'ip': hostvars[item].ansible_host | default('N/D'),
@@ -163,53 +147,30 @@
               }
             ]
           }}
-      loop: "{{ groups['all'] }}"
-
-    - name: Mostrar resumen
-      run_once: true
-      become: false
-      delegate_to: localhost
-      debug:
-        msg:
-          - "TOTAL HOSTS={{ total_hosts }}"
-          - "OK={{ total_ok }}"
-          - "REBOOT={{ total_reboot }}"
-          - "ERROR={{ total_error }}"
-          - "UNREACHABLE={{ total_unreachable }}"
-          - "SERVIDORES={{ servidores_awx | length }}"
-
-    - name: Crear payload
-      run_once: true
-      become: false
-      delegate_to: localhost
-      set_fact:
-        payload_n8n:
-          fecha: "{{ lookup('pipe','date +%F_%T') }}"
-          resumen:
-            total_hosts: "{{ total_hosts | int }}"
-            ok: "{{ total_ok | int }}"
-            reboot: "{{ total_reboot | int }}"
-            error: "{{ total_error | int }}"
-            unreachable: "{{ total_unreachable | int }}"
-          servidores: "{{ servidores_awx }}"
+      loop: "{{ ansible_play_hosts_all }}"
 
     - name: Enviar a n8n
-      run_once: true
-      become: false
-      delegate_to: localhost
       uri:
         url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
         method: POST
         body_format: json
         validate_certs: false
-        return_content: true
         timeout: 60
-        body: "{{ payload_n8n }}"
+
+        body:
+          fecha: "{{ lookup('pipe','date +%F_%T') }}"
+
+          resumen:
+            total_hosts: "{{ total_hosts }}"
+            ok: "{{ total_ok }}"
+            reboot: "{{ total_reboot }}"
+            error: "{{ total_error }}"
+            unreachable: "{{ total_unreachable }}"
+
+          servidores: "{{ servidores_awx }}"
+
       register: webhook_result
 
-    - name: Mostrar respuesta webhook
-      run_once: true
-      become: false
-      delegate_to: localhost
+    - name: Resultado Webhook
       debug:
         var: webhook_result.status
