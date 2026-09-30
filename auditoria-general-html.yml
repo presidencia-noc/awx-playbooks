@@ -3,7 +3,7 @@
 # AUDITORIA
 ########################################################################
 
-- name: Auditoria Linux y Envio Centralizado
+- name: Auditoria Linux y Envio Centralizado a N8N
   hosts: all
   become: true
   gather_facts: false
@@ -68,7 +68,7 @@
             motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado en la ejecución') }}"
 
 ########################################################################
-# CONSOLIDACION Y ENVIO A N8N (Unificado dentro del mismo Play)
+# CONSOLIDACION Y ENVIO A N8N
 ########################################################################
 
     - name: Procesar y enviar resultados a N8N
@@ -119,13 +119,16 @@
 
         - name: Enviar Payload a N8N
           uri:
-            url: "https://presidencia.gob.ar"
+            url: "http://172.21.206"
             method: POST
             body_format: json
             validate_certs: false
             return_content: true
-            status_code: [200, 201, 202]
             timeout: 30
+            status_code:
+              - 200
+              - 201
+              - 202
             body:
               fecha: "{{ lookup('pipe', 'date +%Y-%m-%d_%H:%M:%S') }}"
               resumen:
@@ -141,7 +144,7 @@
           debug:
             var: webhook_result
 
-      # ESTAS LÍNEAS SON LAS CRÍTICAS PARA AWX:
+      # Forzar ejecución local única desde el pod de AWX
       run_once: true
       delegate_to: localhost
       become: false
