@@ -23,7 +23,6 @@
           set_fact:
             estado_awx: "OK"
             motivo_awx: ""
-            updates_count: 0
 
         - name: Validar Debian Ubuntu
           meta: end_host
@@ -31,7 +30,7 @@
             - ansible_os_family is defined
             - ansible_os_family != "Debian"
 
-        - name: Actualizar cache
+        - name: Actualizar cache APT
           shell: apt-get update
           changed_when: false
 
@@ -58,19 +57,6 @@
           when:
             - reboot_required.stat.exists | default(false)
 
-        - name: Resumen host
-          debug:
-            msg:
-              - "--------------------------------------------------"
-              - "HOST      : {{ inventory_hostname }}"
-              - "IP        : {{ ansible_host | default('N/D') }}"
-              - "SO        : {{ ansible_distribution }} {{ ansible_distribution_version }}"
-              - "KERNEL    : {{ ansible_kernel }}"
-              - "PYTHON    : {{ ansible_python_version }}"
-              - "UPDATES   : {{ updates_count }}"
-              - "ESTADO    : {{ estado_awx }}"
-              - "--------------------------------------------------"
-
       rescue:
 
         - name: Registrar error
@@ -78,9 +64,9 @@
             estado_awx: "ERROR"
             motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
 
-######################################################################
-# RESUMEN EJECUTIVO
-######################################################################
+########################################################################
+# RESUMEN
+########################################################################
 
 - name: Resumen Ejecutivo
   hosts: localhost
@@ -88,7 +74,7 @@
 
   tasks:
 
-    - name: Calcular hosts OK
+    - name: Total OK
       set_fact:
         total_ok: >-
           {{
@@ -100,7 +86,7 @@
             | length
           }}
 
-    - name: Calcular hosts REBOOT
+    - name: Total REBOOT
       set_fact:
         total_reboot: >-
           {{
@@ -112,7 +98,7 @@
             | length
           }}
 
-    - name: Calcular hosts ERROR
+    - name: Total ERROR
       set_fact:
         total_error: >-
           {{
@@ -124,11 +110,11 @@
             | length
           }}
 
-    - name: Calcular total hosts
+    - name: Total hosts
       set_fact:
         total_hosts: "{{ groups['all'] | length }}"
 
-    - name: Calcular UNREACHABLE
+    - name: Total unreachable
       set_fact:
         total_unreachable: >-
           {{
@@ -138,42 +124,47 @@
             - total_error | int
           }}
 
-    - name: Mostrar resumen ejecutivo
+    - name: Construir lista de servidores
+      set_fact:
+        servidores_awx: |
+          [
+          {% for host in groups['all'] %}
+            {
+              "host": "{{ host }}",
+              "ip": "{{ hostvars[host].ansible_host | default('N/D') }}",
+              "os": "{{ hostvars[host].ansible_distribution | default('N/D') }} {{ hostvars[host].ansible_distribution_version | default('') }}",
+              "estado": "{{ hostvars[host].estado_awx | default('UNREACHABLE') }}",
+              "updates": "{{ hostvars[host].updates_count | default(0) }}"
+            }{% if not loop.last %},{% endif %}
+          {% endfor %}
+          ]
+
+    - name: Mostrar resumen
       debug:
         msg:
-          - "=================================================="
-          - "AUDITORIA LINUX"
-          - "=================================================="
           - "TOTAL HOSTS : {{ total_hosts }}"
           - "OK          : {{ total_ok }}"
           - "REBOOT      : {{ total_reboot }}"
           - "ERROR       : {{ total_error }}"
           - "UNREACHABLE : {{ total_unreachable }}"
-          - "=================================================="
 
-    - name: Mostrar detalle completo
+    - name: Enviar a n8n
+      uri:
+        url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
+        method: POST
+        body_format: json
+        validate_certs: false
+        body:
+          fecha: "{{ lookup('pipe','date +%F_%T') }}"
+          resumen:
+            total_hosts: "{{ total_hosts }}"
+            ok: "{{ total_ok }}"
+            reboot: "{{ total_reboot }}"
+            error: "{{ total_error }}"
+            unreachable: "{{ total_unreachable }}"
+          servidores: "{{ servidores_awx | from_yaml }}"
+      register: webhook_result
+
+    - name: Mostrar respuesta webhook
       debug:
-        msg:
-          - "HOST      : {{ item }}"
-          - "IP        : {{ hostvars.get(item, {}).get('ansible_host', 'N/D') }}"
-          - "SO        : {{ hostvars.get(item, {}).get('ansible_distribution', 'N/D') }} {{ hostvars.get(item, {}).get('ansible_distribution_version', '') }}"
-          - "KERNEL    : {{ hostvars.get(item, {}).get('ansible_kernel', 'N/D') }}"
-          - "PYTHON    : {{ hostvars.get(item, {}).get('ansible_python_version', 'N/D') }}"
-          - "UPDATES   : {{ hostvars.get(item, {}).get('updates_count', 'N/D') }}"
-          - "ESTADO    : {{ hostvars.get(item, {}).get('estado_awx', 'UNREACHABLE') }}"
-          - "MOTIVO    : {{ hostvars.get(item, {}).get('motivo_awx', '') }}"
-          - "--------------------------------------------------"
-      loop: "{{ groups['all'] }}"
-    - name: Enviar resultados a n8n
-  delegate_to: localhost
-
-  uri:
-    url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
-    method: POST
-    body_format: json
-
-    body:
-      host: "{{ inventory_hostname }}"
-      ip: "{{ ansible_default_ipv4.address }}"
-      os: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
-      estado: "{{ update_status }}"
+        var: webhook_result.status
