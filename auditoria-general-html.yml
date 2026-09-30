@@ -1,5 +1,5 @@
 ---
-- name: Auditoria Linux
+- name: Auditoria Linux y envio a n8n
   hosts: all
   become: true
   gather_facts: false
@@ -24,7 +24,7 @@
             estado_awx: "OK"
             motivo_awx: ""
 
-        - name: Validar Debian
+        - name: Validar Debian Ubuntu
           meta: end_host
           when:
             - ansible_os_family is defined
@@ -68,14 +68,14 @@
 # CONSOLIDACION
 ########################################################################
 
-- name: Consolidar resultados
+- name: Consolidar resultados y enviar a n8n
   hosts: "{{ ansible_play_hosts_all[0] }}"
   gather_facts: false
   become: false
 
   tasks:
 
-    - name: Calcular OK
+    - name: Total OK
       set_fact:
         total_ok: >-
           {{
@@ -86,7 +86,7 @@
             | length
           }}
 
-    - name: Calcular REBOOT
+    - name: Total REBOOT
       set_fact:
         total_reboot: >-
           {{
@@ -97,7 +97,7 @@
             | length
           }}
 
-    - name: Calcular ERROR
+    - name: Total ERROR
       set_fact:
         total_error: >-
           {{
@@ -108,7 +108,7 @@
             | length
           }}
 
-    - name: Total hosts ejecutados
+    - name: Total hosts
       set_fact:
         total_hosts: "{{ ansible_play_hosts_all | length }}"
 
@@ -149,6 +149,38 @@
           }}
       loop: "{{ ansible_play_hosts_all }}"
 
+    - name: Mostrar resumen
+      debug:
+        msg:
+          - "TOTAL HOSTS={{ total_hosts }}"
+          - "OK={{ total_ok }}"
+          - "REBOOT={{ total_reboot }}"
+          - "ERROR={{ total_error }}"
+          - "UNREACHABLE={{ total_unreachable }}"
+          - "SERVIDORES={{ servidores_awx | length }}"
+
+    - name: Verificar DNS n8n
+      command: getent hosts n8n.presidencia.gob.ar
+      register: dns_result
+      changed_when: false
+      failed_when: false
+
+    - name: Mostrar DNS
+      debug:
+        var: dns_result.stdout
+
+    - name: Crear payload
+      set_fact:
+        payload_n8n:
+          fecha: "{{ lookup('pipe','date +%F_%T') }}"
+          resumen:
+            total_hosts: "{{ total_hosts }}"
+            ok: "{{ total_ok }}"
+            reboot: "{{ total_reboot }}"
+            error: "{{ total_error }}"
+            unreachable: "{{ total_unreachable }}"
+          servidores: "{{ servidores_awx }}"
+
     - name: Enviar a n8n
       uri:
         url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
@@ -156,21 +188,11 @@
         body_format: json
         validate_certs: false
         timeout: 60
-
-        body:
-          fecha: "{{ lookup('pipe','date +%F_%T') }}"
-
-          resumen:
-            total_hosts: "{{ total_hosts }}"
-            ok: "{{ total_ok }}"
-            reboot: "{{ total_reboot }}"
-            error: "{{ total_error }}"
-            unreachable: "{{ total_unreachable }}"
-
-          servidores: "{{ servidores_awx }}"
-
+        return_content: true
+        body: "{{ payload_n8n }}"
       register: webhook_result
+      failed_when: false
 
-    - name: Resultado Webhook
+    - name: Resultado webhook
       debug:
-        var: webhook_result.status
+        var: webhook_result
