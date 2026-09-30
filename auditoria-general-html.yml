@@ -24,7 +24,7 @@
             estado_awx: "OK"
             motivo_awx: ""
 
-        - name: Validar Debian
+        - name: Validar Debian Ubuntu
           meta: end_host
           when:
             - ansible_os_family is defined
@@ -65,7 +65,7 @@
             motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
 
 ########################################################################
-# CONSOLIDACION Y ENVIO A N8N
+# CONSOLIDACION
 ########################################################################
 
     - name: Total OK
@@ -133,6 +133,13 @@
             - total_error | int
           }}
 
+    - name: Inicializar lista servidores
+      run_once: true
+      become: false
+      delegate_to: localhost
+      set_fact:
+        servidores_awx: []
+
     - name: Construir lista servidores
       run_once: true
       become: false
@@ -140,32 +147,23 @@
       set_fact:
         servidores_awx: >-
           {{
-            groups['all']
-            | map('extract', hostvars)
-            | map('combine', {})
-            | list
+            servidores_awx + [
+              {
+                'host': item,
+                'ip': hostvars[item].ansible_host | default('N/D'),
+                'os': (
+                  hostvars[item].ansible_distribution | default('N/D')
+                ) ~ ' ' ~ (
+                  hostvars[item].ansible_distribution_version | default('')
+                ),
+                'kernel': hostvars[item].ansible_kernel | default('N/D'),
+                'updates': hostvars[item].updates_count | default(0),
+                'estado': hostvars[item].estado_awx | default('UNREACHABLE'),
+                'motivo': hostvars[item].motivo_awx | default('')
+              }
+            ]
           }}
-
-    - name: Crear JSON para n8n
-      run_once: true
-      become: false
-      delegate_to: localhost
-      set_fact:
-        payload_n8n:
-          fecha: "{{ lookup('pipe','date +%F_%T') }}"
-          resumen:
-            total_hosts: "{{ total_hosts }}"
-            ok: "{{ total_ok }}"
-            reboot: "{{ total_reboot }}"
-            error: "{{ total_error }}"
-            unreachable: "{{ total_unreachable }}"
-          servidores: >-
-            {{
-              groups['all']
-              | map('extract', hostvars)
-              | map('combine', {})
-              | list
-            }}
+      loop: "{{ groups['all'] }}"
 
     - name: Mostrar resumen
       run_once: true
@@ -178,6 +176,22 @@
           - "REBOOT={{ total_reboot }}"
           - "ERROR={{ total_error }}"
           - "UNREACHABLE={{ total_unreachable }}"
+          - "SERVIDORES={{ servidores_awx | length }}"
+
+    - name: Crear payload
+      run_once: true
+      become: false
+      delegate_to: localhost
+      set_fact:
+        payload_n8n:
+          fecha: "{{ lookup('pipe','date +%F_%T') }}"
+          resumen:
+            total_hosts: "{{ total_hosts | int }}"
+            ok: "{{ total_ok | int }}"
+            reboot: "{{ total_reboot | int }}"
+            error: "{{ total_error | int }}"
+            unreachable: "{{ total_unreachable | int }}"
+          servidores: "{{ servidores_awx }}"
 
     - name: Enviar a n8n
       run_once: true
