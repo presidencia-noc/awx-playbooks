@@ -11,62 +11,61 @@
   ignore_unreachable: true
 
   tasks:
-
-    - name: Inicializar estado
+    - name: Inicializar estado por defecto
       set_fact:
         estado_awx: "UNREACHABLE"
         motivo_awx: "Host no accesible"
         updates_count: 0
 
     - block:
-
         - name: Recolectar facts
           setup:
 
-        - name: Host accesible
-          set_fact:
-            estado_awx: "OK"
-            motivo_awx: ""
-
-        - name: Validar Debian Ubuntu
-          meta: end_host
-          when:
-            - ansible_os_family is defined
-            - ansible_os_family != "Debian"
-
-        - name: Actualizar cache apt
-          shell: apt-get update
-          changed_when: false
-
-        - name: Detectar actualizaciones
-          shell: |
-            apt-get --simulate dist-upgrade 2>/dev/null | grep '^Inst ' || true
-          register: updates_preview
-          changed_when: false
-          failed_when: false
-
-        - name: Contar actualizaciones
-          set_fact:
-            updates_count: "{{ updates_preview.stdout_lines | length }}"
-
-        - name: Detectar reboot requerido
-          stat:
-            path: /var/run/reboot-required
-          register: reboot_required
-
-        - name: Marcar reboot
-          set_fact:
-            estado_awx: "REBOOT"
-            motivo_awx: "Reinicio pendiente"
-          when:
-            - reboot_required.stat.exists | default(false)
-
-      rescue:
-
-        - name: Registrar error
+        - name: Validar si es Debian u Ubuntu
           set_fact:
             estado_awx: "ERROR"
-            motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
+            motivo_awx: "Sistema operativo no soportado (No es Debian/Ubuntu)"
+          when: ansible_os_family is not defined or ansible_os_family != "Debian"
+
+        # Solo continuar si pasó la validación de OS
+        - block:
+            - name: Host accesible y validado
+              set_fact:
+                estado_awx: "OK"
+                motivo_awx: ""
+
+            - name: Actualizar cache apt
+              shell: apt-get update
+              changed_when: false
+
+            - name: Detectar actualizaciones
+              shell: |
+                apt-get --simulate dist-upgrade 2>/dev/null | grep '^Inst ' || true
+              register: updates_preview
+              changed_when: false
+              failed_when: false
+
+            - name: Contar actualizaciones
+              set_fact:
+                updates_count: "{{ updates_preview.stdout_lines | length | default(0) }}"
+
+            - name: Detectar reboot requerido
+              stat:
+                path: /var/run/reboot-required
+              register: reboot_required
+
+            - name: Marcar reboot
+              set_fact:
+                estado_awx: "REBOOT"
+                motivo_awx: "Reinicio pendiente"
+              when: reboot_required.stat.exists | default(false)
+          when: estado_awx != "ERROR"
+
+      rescue:
+        - name: Registrar error en caso de fallo de comandos
+          set_fact:
+            estado_awx: "ERROR"
+            motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado en la ejecución') }}"
 
 ########################################################################
 # CONSOLIDACION Y ENVIO A N8N
@@ -78,89 +77,42 @@
   become: false
 
   tasks:
-
     - name: Definir hosts ejecutados
       set_fact:
         hosts_ejecutados: "{{ groups['all'] | difference(['localhost']) }}"
 
-    - name: Total OK
+    - name: Calcular Totales de Estados
       set_fact:
-        total_ok: >-
-          {{
-            hosts_ejecutados
-            | map('extract', hostvars)
-            | selectattr('estado_awx','defined')
-            | selectattr('estado_awx','equalto','OK')
-            | list
-            | length
-          }}
-
-    - name: Total REBOOT
-      set_fact:
-        total_reboot: >-
-          {{
-            hosts_ejecutados
-            | map('extract', hostvars)
-            | selectattr('estado_awx','defined')
-            | selectattr('estado_awx','equalto','REBOOT')
-            | list
-            | length
-          }}
-
-    - name: Total ERROR
-      set_fact:
-        total_error: >-
-          {{
-            hosts_ejecutados
-            | map('extract', hostvars)
-            | selectattr('estado_awx','defined')
-            | selectattr('estado_awx','equalto','ERROR')
-            | list
-            | length
-          }}
-
-    - name: Total hosts
-      set_fact:
+        total_ok: "{{ hosts_ejecutados | map('extract', hostvars) | selectattr('estado_awx', 'defined') | selectattr('estado_awx', '==', 'OK') | list | length }}"
+        total_reboot: "{{ hosts_ejecutados | map('extract', hostvars) | selectattr('estado_awx', 'defined') | selectattr('estado_awx', '==', 'REBOOT') | list | length }}"
+        total_error: "{{ hosts_ejecutados | map('extract', hostvars) | selectattr('estado_awx', 'defined') | selectattr('estado_awx', '==', 'ERROR') | list | length }}"
         total_hosts: "{{ hosts_ejecutados | length }}"
 
     - name: Total unreachable
       set_fact:
-        total_unreachable: >-
-          {{
-            total_hosts | int
-            - total_ok | int
-            - total_reboot | int
-            - total_error | int
-          }}
+        total_unreachable: "{{ total_hosts | int - total_ok | int - total_reboot | int - total_error | int }}"
 
-    - name: Inicializar lista servidores
-      set_fact:
-        servidores_awx: []
-
-    - name: Construir lista servidores
+    - name: Construir JSON de servidores eficientemente
       set_fact:
         servidores_awx: >-
-          {{
-            servidores_awx +
-            [
-              {
-                'host': item,
-                'ip': hostvars[item].ansible_host | default('N/D'),
-                'os': (
-                  hostvars[item].ansible_distribution | default('N/D')
-                ) ~ ' ' ~ (
-                  hostvars[item].ansible_distribution_version | default('')
-                ),
-                'kernel': hostvars[item].ansible_kernel | default('N/D'),
-                'updates': hostvars[item].updates_count | default(0),
-                'estado': hostvars[item].estado_awx | default('UNREACHABLE'),
-                'motivo': hostvars[item].motivo_awx | default('')
-              }
-            ]
-          }}
-      loop: "{{ hosts_ejecutados }}"
+          {% set lista = [] %}
+          {% for item in hosts_ejecutados %}
+            {% set hvar = hostvars[item] %}
+            {% set estado = hvar.estado_awx | default('UNREACHABLE') %}
+            {% set info_os = (hvar.ansible_distribution | default('N/D')) ~ ' ' ~ (hvar.ansible_distribution_version | default('')) %}
+            {% set _ = lista.append({
+              'host': item,
+              'ip': hvar.ansible_host | default(item),
+              'os': info_os if estado != 'UNREACHABLE' else 'N/D',
+              'kernel': hvar.ansible_kernel | default('N/D'),
+              'updates': hvar.updates_count | default(0) | int,
+              'estado': estado,
+              'motivo': hvar.motivo_awx | default('') if estado != 'OK' else ''
+            }) %}
+          {% endfor %}
+          {{ lista }}
 
-    - name: Mostrar resumen
+    - name: Mostrar resumen en logs de AWX
       debug:
         msg:
           - "TOTAL HOSTS={{ total_hosts }}"
@@ -168,21 +120,8 @@
           - "REBOOT={{ total_reboot }}"
           - "ERROR={{ total_error }}"
           - "UNREACHABLE={{ total_unreachable }}"
-          - "SERVIDORES={{ servidores_awx | length }}"
 
-    - name: Crear payload
-      set_fact:
-        payload_n8n:
-          fecha: "{{ lookup('pipe','date +%F_%T') }}"
-          resumen:
-            total_hosts: "{{ total_hosts }}"
-            ok: "{{ total_ok }}"
-            reboot: "{{ total_reboot }}"
-            error: "{{ total_error }}"
-            unreachable: "{{ total_unreachable }}"
-          servidores: "{{ servidores_awx }}"
-
-    - name: Enviar a n8n
+    - name: Enviar Payload a N8N
       uri:
         url: "https://n8n.presidencia.gob.ar/webhook/awx-auditoria"
         method: POST
@@ -190,10 +129,17 @@
         validate_certs: false
         return_content: true
         timeout: 60
-        body: "{{ payload_n8n }}"
+        body:
+          fecha: "{{ lookup('pipe', 'date +%Y-%m-%d_%H:%M:%S') }}"
+          resumen:
+            total_hosts: "{{ total_hosts | int }}"
+            ok: "{{ total_ok | int }}"
+            reboot: "{{ total_reboot | int }}"
+            error: "{{ total_error | int }}"
+            unreachable: "{{ total_unreachable | int }}"
+          servidores: "{{ servidores_awx }}"
       register: webhook_result
 
     - name: Resultado webhook
       debug:
         var: webhook_result.status
-``
