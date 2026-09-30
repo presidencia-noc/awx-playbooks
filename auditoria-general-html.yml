@@ -30,7 +30,7 @@
             - ansible_os_family is defined
             - ansible_os_family != "Debian"
 
-        - name: Actualizar cache apt
+        - name: Actualizar cache APT
           shell: apt-get update
           changed_when: false
 
@@ -64,9 +64,8 @@
             estado_awx: "ERROR"
             motivo_awx: "{{ ansible_failed_result.msg | default('Error no especificado') }}"
 
-
 ########################################################################
-# RESUMEN EJECUTIVO
+# CONSOLIDACIÓN Y ENVÍO A N8N
 ########################################################################
 
 - name: Consolidar resultados y enviar a n8n
@@ -125,11 +124,11 @@
             - total_error | int
           }}
 
-    - name: Inicializar array de servidores
+    - name: Inicializar lista de servidores
       set_fact:
         servidores_awx: []
 
-    - name: Agregar servidores al array
+    - name: Agregar servidores al JSON
       set_fact:
         servidores_awx: >-
           {{
@@ -144,7 +143,6 @@
                   hostvars[item].ansible_distribution_version | default('')
                 ),
                 'kernel': hostvars[item].ansible_kernel | default('N/D'),
-                'python': hostvars[item].ansible_python_version | default('N/D'),
                 'updates': hostvars[item].updates_count | default(0),
                 'estado': hostvars[item].estado_awx | default('UNREACHABLE'),
                 'motivo': hostvars[item].motivo_awx | default('')
@@ -156,15 +154,15 @@
     - name: Mostrar resumen
       debug:
         msg:
-          - "================================================"
+          - "==============================================="
           - "AUDITORIA LINUX"
-          - "================================================"
+          - "==============================================="
           - "TOTAL HOSTS : {{ total_hosts }}"
           - "OK          : {{ total_ok }}"
           - "REBOOT      : {{ total_reboot }}"
           - "ERROR       : {{ total_error }}"
           - "UNREACHABLE : {{ total_unreachable }}"
-          - "================================================"
+          - "==============================================="
 
     - name: Enviar resultado consolidado a n8n
       uri:
@@ -175,20 +173,19 @@
         return_content: true
 
         body:
-
-          fecha: "{{ lookup('pipe', 'date +%F_%T') }}"
+          fecha: "{{ lookup('pipe','date +%F_%T') }}"
 
           resumen:
-            total_hosts: "{{ total_hosts }}"
-            ok: "{{ total_ok }}"
-            reboot: "{{ total_reboot }}"
-            error: "{{ total_error }}"
-            unreachable: "{{ total_unreachable }}"
+            total_hosts: "{{ total_hosts | int }}"
+            ok: "{{ total_ok | int }}"
+            reboot: "{{ total_reboot | int }}"
+            error: "{{ total_error | int }}"
+            unreachable: "{{ total_unreachable | int }}"
 
-          servidores: {{ servidores_awx }}
+          servidores: "{{ servidores_awx }}"
 
       register: webhook_result
 
-    - name: Mostrar respuesta de n8n
+    - name: Mostrar respuesta webhook
       debug:
         var: webhook_result.status
