@@ -1,14 +1,17 @@
 ---
-- name: Auditar versiones PHP y contenedores Docker
+- name: Auditoria de versiones PHP en hosts Linux y contenedores Docker
   hosts: all
   gather_facts: true
   become: true
 
   vars:
-    # Cambiar por la URL real del webhook de produccion de n8n.
-    n8n_webhook_url: "https://N8N.DOMINIO.COM/webhook/auditoria-php"
+    n8n_webhook_url: "https://n8n.presidencia.gob.ar/webhook/auditoria-php"
 
   tasks:
+
+    # ============================================================
+    # INFORMACION GENERAL DEL HOST
+    # ============================================================
 
     - name: Inicializar informacion del servidor
       ansible.builtin.set_fact:
@@ -30,6 +33,10 @@
           php_host_rama: "N/A"
           docker_instalado: false
           contenedores: []
+
+    # ============================================================
+    # PHP DEL HOST
+    # ============================================================
 
     - name: Detectar version y rama PHP en el host
       ansible.builtin.shell: |
@@ -65,7 +72,11 @@
               })
           }}
 
-    - name: Comprobar si Docker esta instalado y disponible
+    # ============================================================
+    # DOCKER
+    # ============================================================
+
+    - name: Comprobar si Docker esta instalado y operativo
       ansible.builtin.shell: |
         if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
           echo "SI"
@@ -88,6 +99,10 @@
               })
           }}
 
+    # ============================================================
+    # CONTENEDORES DOCKER
+    # ============================================================
+
     - name: Obtener contenedores Docker en ejecucion
       ansible.builtin.shell: |
         docker ps --format '{% raw %}{{.Names}}|{{.Image}}{% endraw %}'
@@ -97,6 +112,10 @@
       changed_when: false
       failed_when: false
       when: auditoria_php.docker_instalado | bool
+
+    # ============================================================
+    # PHP DENTRO DE CADA CONTENEDOR
+    # ============================================================
 
     - name: Consultar PHP dentro de cada contenedor
       ansible.builtin.shell: |
@@ -115,7 +134,7 @@
 
           if [ -n "$PHP_BIN" ]; then
             VERSION="$("$PHP_BIN" -r "echo PHP_VERSION;" 2>/dev/null)"
-            RAMA="$("$PHP_BIN" -r "echo PHP_MAJOR_VERSION . \"\.\" . PHP_MINOR_VERSION;" 2>/dev/null)"
+            RAMA="$("$PHP_BIN" -r "echo PHP_MAJOR_VERSION . \".\" . PHP_MINOR_VERSION;" 2>/dev/null)"
             printf "%s|%s\n" "$VERSION" "$RAMA"
           else
             printf "%s|%s\n" "NO INSTALADO" "N/A"
@@ -130,6 +149,10 @@
       when:
         - auditoria_php.docker_instalado | bool
         - docker_containers.stdout_lines | default([]) | length > 0
+
+    # ============================================================
+    # INCORPORAR CONTENEDORES AL RESULTADO DEL HOST
+    # ============================================================
 
     - name: Incorporar contenedores al reporte
       ansible.builtin.set_fact:
@@ -161,9 +184,24 @@
         - item.item is defined
         - not item.skipped | default(false)
 
-    - name: Mostrar resultado individual en AWX
+    # ============================================================
+    # MOSTRAR RESULTADO INDIVIDUAL EN AWX
+    # ============================================================
+
+    - name: Mostrar resultado individual del host
       ansible.builtin.debug:
-        var: auditoria_php
+        msg:
+          hostname: "{{ auditoria_php.hostname }}"
+          ip: "{{ auditoria_php.ip }}"
+          sistema_operativo: "{{ auditoria_php.sistema_operativo }}"
+          php_host_version: "{{ auditoria_php.php_host_version }}"
+          php_host_rama: "{{ auditoria_php.php_host_rama }}"
+          docker_instalado: "{{ auditoria_php.docker_instalado }}"
+          contenedores: "{{ auditoria_php.contenedores }}"
+
+    # ============================================================
+    # CONSOLIDACION
+    # ============================================================
 
     - name: Consolidar resultados de todos los hosts
       ansible.builtin.set_fact:
@@ -176,27 +214,40 @@
           }}
       run_once: true
       delegate_to: localhost
+      delegate_facts: true
       become: false
 
-    - name: Mostrar JSON consolidado antes de enviarlo
+    # ============================================================
+    # MOSTRAR INFORME CONSOLIDADO EN AWX
+    # ============================================================
+
+    - name: Mostrar cantidad de hosts auditados
       ansible.builtin.debug:
-        var: auditoria_php_consolidada
+        msg: >-
+          Auditoria PHP finalizada.
+          Total de hosts incluidos:
+          {{ hostvars['localhost']['auditoria_php_consolidada'] | length }}
       run_once: true
       delegate_to: localhost
       become: false
 
-    - name: Enviar auditoria consolidada al webhook de n8n
+    # ============================================================
+    # ENVIAR RESULTADO A N8N
+    # ============================================================
+
+    - name: Enviar informe consolidado al webhook de n8n
       ansible.builtin.uri:
         url: "{{ n8n_webhook_url }}"
         method: POST
         body_format: json
+        headers:
+          Content-Type: "application/json"
         body:
           fecha_auditoria: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
           origen: "AWX"
-          total_hosts: "{{ auditoria_php_consolidada | length }}"
-          hosts: "{{ auditoria_php_consolidada }}"
-        headers:
-          Content-Type: "application/json"
+          tipo_auditoria: "PHP"
+          total_hosts: "{{ hostvars['localhost']['auditoria_php_consolidada'] | length }}"
+          hosts: "{{ hostvars['localhost']['auditoria_php_consolidada'] }}"
         status_code:
           - 200
           - 201
@@ -209,11 +260,16 @@
       delegate_to: localhost
       become: false
 
-    - name: Mostrar respuesta de n8n
+    # ============================================================
+    # CONFIRMACION
+    # ============================================================
+
+    - name: Mostrar respuesta del webhook n8n
       ansible.builtin.debug:
-        msg: |
-          Estado HTTP: {{ respuesta_n8n.status }}
-          Respuesta: {{ respuesta_n8n.content | default('Sin contenido') }}
+        msg:
+          - "Informe enviado a n8n."
+          - "HTTP Status: {{ respuesta_n8n.status }}"
+          - "Respuesta: {{ respuesta_n8n.content | default('Sin contenido') }}"
       run_once: true
       delegate_to: localhost
       become: false
