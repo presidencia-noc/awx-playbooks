@@ -1,40 +1,92 @@
 ---
-- name: Inventario de versiones PHP
+- name: Auditar versiones PHP y contenedores Docker
   hosts: all
-  gather_facts: false
+  gather_facts: true
   become: true
+
+  vars:
+    # Cambiar por la URL real del webhook de produccion de n8n.
+    n8n_webhook_url: "https://N8N.DOMINIO.COM/webhook/auditoria-php"
 
   tasks:
 
-    - name: Obtener hostname
-      ansible.builtin.command: hostname
-      register: hostname_result
-      changed_when: false
+    - name: Inicializar informacion del servidor
+      ansible.builtin.set_fact:
+        auditoria_php:
+          hostname: "{{ ansible_fqdn | default(ansible_hostname) }}"
+          inventory_hostname: "{{ inventory_hostname }}"
+          ip: >-
+            {{
+              ansible_default_ipv4.address
+              | default(ansible_all_ipv4_addresses[0] | default('NO DETECTADA'))
+            }}
+          sistema_operativo: >-
+            {{
+              ansible_distribution
+              ~ ' '
+              ~ ansible_distribution_version
+            }}
+          php_host_version: "NO INSTALADO"
+          php_host_rama: "N/A"
+          docker_instalado: false
+          contenedores: []
 
-    - name: Detectar PHP en el host
+    - name: Detectar version y rama PHP en el host
       ansible.builtin.shell: |
         if command -v php >/dev/null 2>&1; then
-          php -r 'echo PHP_VERSION;'
+          VERSION="$(php -r 'echo PHP_VERSION;' 2>/dev/null)"
+          RAMA="$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null)"
+          printf '%s|%s\n' "$VERSION" "$RAMA"
         else
-          echo "NO INSTALADO"
+          printf '%s|%s\n' "NO INSTALADO" "N/A"
         fi
       args:
         executable: /bin/sh
-      register: php_host
+      register: php_host_result
       changed_when: false
       failed_when: false
 
-    - name: Verificar si Docker esta instalado
+    - name: Guardar version y rama PHP del host
+      ansible.builtin.set_fact:
+        auditoria_php: >-
+          {{
+            auditoria_php
+            | combine({
+                'php_host_version':
+                  (
+                    php_host_result.stdout.split('|')[0]
+                    | default('NO INSTALADO')
+                  ),
+                'php_host_rama':
+                  (
+                    php_host_result.stdout.split('|')[1]
+                    | default('N/A')
+                  )
+              })
+          }}
+
+    - name: Comprobar si Docker esta instalado y disponible
       ansible.builtin.shell: |
-        if command -v docker >/dev/null 2>&1; then
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
           echo "SI"
         else
           echo "NO"
         fi
       args:
         executable: /bin/sh
-      register: docker_instalado
+      register: docker_result
       changed_when: false
+      failed_when: false
+
+    - name: Guardar estado de Docker
+      ansible.builtin.set_fact:
+        auditoria_php: >-
+          {{
+            auditoria_php
+            | combine({
+                'docker_instalado': docker_result.stdout == 'SI'
+              })
+          }}
 
     - name: Obtener contenedores Docker en ejecucion
       ansible.builtin.shell: |
@@ -44,62 +96,124 @@
       register: docker_containers
       changed_when: false
       failed_when: false
-      when: docker_instalado.stdout == "SI"
+      when: auditoria_php.docker_instalado | bool
 
-    - name: Detectar PHP dentro de cada contenedor
+    - name: Consultar PHP dentro de cada contenedor
       ansible.builtin.shell: |
         CONTAINER="{{ item.split('|')[0] }}"
 
-        VERSION=$(docker exec "$CONTAINER" sh -c '
-          if command -v php >/dev/null 2>&1; then
-            php -r "echo PHP_VERSION;"
-          elif [ -x /usr/local/bin/php ]; then
-            /usr/local/bin/php -r "echo PHP_VERSION;"
-          elif [ -x /usr/bin/php ]; then
-            /usr/bin/php -r "echo PHP_VERSION;"
-          else
-            echo "NO PHP"
-          fi
-        ' 2>/dev/null)
+        docker exec "$CONTAINER" sh -c '
+          PHP_BIN=""
 
-        echo "$VERSION"
+          if command -v php >/dev/null 2>&1; then
+            PHP_BIN="$(command -v php)"
+          elif [ -x /usr/local/bin/php ]; then
+            PHP_BIN="/usr/local/bin/php"
+          elif [ -x /usr/bin/php ]; then
+            PHP_BIN="/usr/bin/php"
+          fi
+
+          if [ -n "$PHP_BIN" ]; then
+            VERSION="$("$PHP_BIN" -r "echo PHP_VERSION;" 2>/dev/null)"
+            RAMA="$("$PHP_BIN" -r "echo PHP_MAJOR_VERSION . \"\.\" . PHP_MINOR_VERSION;" 2>/dev/null)"
+            printf "%s|%s\n" "$VERSION" "$RAMA"
+          else
+            printf "%s|%s\n" "NO INSTALADO" "N/A"
+          fi
+        '
       args:
         executable: /bin/sh
       loop: "{{ docker_containers.stdout_lines | default([]) }}"
-      register: php_docker
+      register: php_docker_result
       changed_when: false
       failed_when: false
       when:
-        - docker_instalado.stdout == "SI"
+        - auditoria_php.docker_instalado | bool
         - docker_containers.stdout_lines | default([]) | length > 0
 
-    - name: REPORTE PHP DEL SERVIDOR
+    - name: Incorporar contenedores al reporte
+      ansible.builtin.set_fact:
+        auditoria_php: >-
+          {{
+            auditoria_php
+            | combine({
+                'contenedores':
+                  auditoria_php.contenedores
+                  +
+                  [{
+                    'nombre': item.item.split('|')[0],
+                    'imagen': item.item.split('|')[1],
+                    'php_version':
+                      (
+                        item.stdout.split('|')[0]
+                        | default('NO DETERMINADO')
+                      ),
+                    'php_rama':
+                      (
+                        item.stdout.split('|')[1]
+                        | default('N/A')
+                      )
+                  }]
+              })
+          }}
+      loop: "{{ php_docker_result.results | default([]) }}"
+      when:
+        - item.item is defined
+        - not item.skipped | default(false)
+
+    - name: Mostrar resultado individual en AWX
+      ansible.builtin.debug:
+        var: auditoria_php
+
+    - name: Consolidar resultados de todos los hosts
+      ansible.builtin.set_fact:
+        auditoria_php_consolidada: >-
+          {{
+            ansible_play_hosts_all
+            | map('extract', hostvars, 'auditoria_php')
+            | select('defined')
+            | list
+          }}
+      run_once: true
+      delegate_to: localhost
+      become: false
+
+    - name: Mostrar JSON consolidado antes de enviarlo
+      ansible.builtin.debug:
+        var: auditoria_php_consolidada
+      run_once: true
+      delegate_to: localhost
+      become: false
+
+    - name: Enviar auditoria consolidada al webhook de n8n
+      ansible.builtin.uri:
+        url: "{{ n8n_webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          fecha_auditoria: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+          origen: "AWX"
+          total_hosts: "{{ auditoria_php_consolidada | length }}"
+          hosts: "{{ auditoria_php_consolidada }}"
+        headers:
+          Content-Type: "application/json"
+        status_code:
+          - 200
+          - 201
+          - 202
+        return_content: true
+        timeout: 60
+        validate_certs: true
+      register: respuesta_n8n
+      run_once: true
+      delegate_to: localhost
+      become: false
+
+    - name: Mostrar respuesta de n8n
       ansible.builtin.debug:
         msg: |
-          
-          ============================================================
-          REPORTE PHP
-          ============================================================
-          HOST: {{ hostname_result.stdout }}
-          PHP HOST: {{ php_host.stdout }}
-          DOCKER: {{ docker_instalado.stdout }}
-          ------------------------------------------------------------
-          {% if docker_instalado.stdout == "SI" %}
-          {% if docker_containers.stdout_lines | default([]) | length > 0 %}
-          CONTENEDORES:
-          {% for container in docker_containers.stdout_lines %}
-          {% set datos = container.split('|') %}
-          {% set resultado = php_docker.results[loop.index0] if php_docker.results is defined else none %}
-          
-          Nombre : {{ datos[0] }}
-          Imagen : {{ datos[1] }}
-          PHP    : {{ resultado.stdout if resultado is not none else 'NO DETERMINADO' }}
-          ------------------------------------------------------------
-          {% endfor %}
-          {% else %}
-          No hay contenedores Docker en ejecucion.
-          {% endif %}
-          {% else %}
-          Docker no instalado.
-          {% endif %}
-          ============================================================
+          Estado HTTP: {{ respuesta_n8n.status }}
+          Respuesta: {{ respuesta_n8n.content | default('Sin contenido') }}
+      run_once: true
+      delegate_to: localhost
+      become: false
