@@ -1,13 +1,276 @@
-hostname
-hostname -I
-cat /etc/os-release
+#!/bin/bash
 
-php -v 2>/dev/null || true
+# ============================================================
+# Auditoria de PHP - Host + Docker
+# Solo lectura: NO modifica absolutamente nada
+# ============================================================
 
-ps aux | grep -Ei '[p]hp|[p]hp-fpm' || true
+HOSTNAME=$(hostname -f 2>/dev/null || hostname)
+IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 
-systemctl list-units --type=service --all 2>/dev/null \
- | grep -Ei 'php|fpm' || true
+echo
+echo "============================================================"
+echo "        AUDITORIA PHP - HOST Y CONTENEDORES DOCKER"
+echo "============================================================"
+echo "Hostname : $HOSTNAME"
+echo "IP       : ${IP:-No detectada}"
+echo "Fecha    : $(date '+%Y-%m-%d %H:%M:%S')"
+echo "============================================================"
 
-apache2ctl -M 2>/dev/null | grep -i php || true
-httpd -M 2>/dev/null | grep -i php || true
+echo
+echo "---------------- SISTEMA OPERATIVO ----------------"
+echo
+
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    echo "Sistema  : ${PRETTY_NAME:-Desconocido}"
+else
+    echo "Sistema  : No se pudo detectar"
+fi
+
+echo
+echo "---------------- PHP EN EL HOST -------------------"
+echo
+
+PHP_HOST="NO"
+
+if command -v php >/dev/null 2>&1; then
+
+    PHP_HOST="SI"
+    PHP_BIN=$(command -v php)
+
+    echo "PHP encontrado"
+    echo "Ruta     : $PHP_BIN"
+    echo "Version  :"
+    php -v 2>/dev/null | head -n 2
+
+    echo
+    echo "Version corta:"
+    php -r 'echo PHP_VERSION . PHP_EOL;' 2>/dev/null
+
+    echo
+    echo "SAPI:"
+    php -r 'echo PHP_SAPI . PHP_EOL;' 2>/dev/null
+
+else
+    echo "PHP CLI no encontrado en el host."
+fi
+
+
+echo
+echo "---------------- PHP-FPM --------------------------"
+echo
+
+FPM_FOUND="NO"
+
+if command -v systemctl >/dev/null 2>&1; then
+
+    FPM_SERVICES=$(systemctl list-unit-files 2>/dev/null \
+        | grep -Ei 'php.*fpm' \
+        | awk '{print $1}')
+
+    if [ -n "$FPM_SERVICES" ]; then
+
+        FPM_FOUND="SI"
+
+        echo "$FPM_SERVICES" | while read -r SERVICE; do
+
+            [ -z "$SERVICE" ] && continue
+
+            STATUS=$(systemctl is-active "$SERVICE" 2>/dev/null)
+
+            echo "$SERVICE : $STATUS"
+
+        done
+
+    else
+        echo "No se detectaron servicios PHP-FPM."
+    fi
+
+else
+    echo "systemctl no disponible."
+fi
+
+
+echo
+echo "---------------- PROCESOS PHP ---------------------"
+echo
+
+PHP_PROCS=$(ps aux 2>/dev/null | grep -Ei '[p]hp|[p]hp-fpm')
+
+if [ -n "$PHP_PROCS" ]; then
+    echo "$PHP_PROCS"
+else
+    echo "No se detectaron procesos PHP activos."
+fi
+
+
+echo
+echo "---------------- DOCKER ---------------------------"
+echo
+
+if ! command -v docker >/dev/null 2>&1; then
+
+    echo "Docker no esta instalado."
+    DOCKER_FOUND="NO"
+
+else
+
+    DOCKER_FOUND="SI"
+
+    echo "Docker encontrado:"
+    docker --version 2>/dev/null
+
+    echo
+
+    if ! docker info >/dev/null 2>&1; then
+
+        echo "Docker esta instalado pero el daemon no esta disponible."
+        echo "No se pueden inspeccionar contenedores."
+
+    else
+
+        CONTAINERS=$(docker ps -aq 2>/dev/null)
+
+        if [ -z "$CONTAINERS" ]; then
+
+            echo "Docker funciona pero no existen contenedores."
+
+        else
+
+            TOTAL=$(echo "$CONTAINERS" | wc -l)
+
+            echo "Contenedores encontrados: $TOTAL"
+            echo
+
+            NUM=0
+            PHP_CONTAINERS=0
+
+            for ID in $CONTAINERS; do
+
+                NUM=$((NUM + 1))
+
+                NAME=$(docker inspect \
+                    --format '{{.Name}}' "$ID" 2>/dev/null \
+                    | sed 's#^/##')
+
+                IMAGE=$(docker inspect \
+                    --format '{{.Config.Image}}' "$ID" 2>/dev/null)
+
+                STATE=$(docker inspect \
+                    --format '{{.State.Status}}' "$ID" 2>/dev/null)
+
+                PORTS=$(docker port "$ID" 2>/dev/null \
+                    | tr '\n' ' ')
+
+                echo "============================================================"
+                echo "CONTENEDOR #$NUM"
+                echo "============================================================"
+                echo "Nombre : $NAME"
+                echo "ID     : ${ID:0:12}"
+                echo "Imagen : $IMAGE"
+                echo "Estado : $STATE"
+
+                if [ -n "$PORTS" ]; then
+                    echo "Puertos: $PORTS"
+                else
+                    echo "Puertos: Sin puertos publicados"
+                fi
+
+                echo
+                echo "PHP:"
+
+                if [ "$STATE" != "running" ]; then
+
+                    echo "NO VERIFICADO - contenedor detenido"
+
+                else
+
+                    PHP_RESULT=$(docker exec "$ID" sh -c '
+                        if command -v php >/dev/null 2>&1; then
+                            php -r "echo PHP_VERSION . PHP_EOL;" 2>/dev/null
+                        elif [ -x /usr/local/bin/php ]; then
+                            /usr/local/bin/php -r "echo PHP_VERSION . PHP_EOL;" 2>/dev/null
+                        elif [ -x /usr/bin/php ]; then
+                            /usr/bin/php -r "echo PHP_VERSION . PHP_EOL;" 2>/dev/null
+                        else
+                            exit 10
+                        fi
+                    ' 2>/dev/null)
+
+                    RET=$?
+
+                    if [ "$RET" -eq 0 ] && [ -n "$PHP_RESULT" ]; then
+
+                        PHP_CONTAINERS=$((PHP_CONTAINERS + 1))
+
+                        echo "ENCONTRADO"
+                        echo "Version: $PHP_RESULT"
+
+                        PHP_FULL=$(docker exec "$ID" sh -c '
+                            if command -v php >/dev/null 2>&1; then
+                                php -v 2>/dev/null | head -n 2
+                            elif [ -x /usr/local/bin/php ]; then
+                                /usr/local/bin/php -v 2>/dev/null | head -n 2
+                            elif [ -x /usr/bin/php ]; then
+                                /usr/bin/php -v 2>/dev/null | head -n 2
+                            fi
+                        ' 2>/dev/null)
+
+                        echo
+                        echo "$PHP_FULL"
+
+                    else
+
+                        echo "NO DETECTADO"
+
+                    fi
+                fi
+
+                echo
+            done
+
+        fi
+    fi
+fi
+
+
+echo
+echo "============================================================"
+echo "                    RESUMEN"
+echo "============================================================"
+echo
+
+echo "Host: $HOSTNAME"
+echo "IP  : ${IP:-No detectada}"
+
+if [ "$PHP_HOST" = "SI" ]; then
+
+    HOST_VERSION=$(php -r 'echo PHP_VERSION;' 2>/dev/null)
+
+    echo "PHP Host : $HOST_VERSION"
+
+else
+
+    echo "PHP Host : NO DETECTADO"
+
+fi
+
+echo "PHP-FPM  : $FPM_FOUND"
+echo "Docker   : $DOCKER_FOUND"
+
+if [ "$DOCKER_FOUND" = "SI" ] && docker info >/dev/null 2>&1; then
+
+    RUNNING=$(docker ps -q 2>/dev/null | wc -l)
+    TOTAL=$(docker ps -aq 2>/dev/null | wc -l)
+
+    echo "Containers totales       : $TOTAL"
+    echo "Containers funcionando   : $RUNNING"
+
+fi
+
+echo
+echo "============================================================"
+echo "AUDITORIA FINALIZADA"
+echo "============================================================"
+echo
