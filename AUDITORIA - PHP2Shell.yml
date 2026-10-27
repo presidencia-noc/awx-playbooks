@@ -1,0 +1,13 @@
+hostname
+hostname -I
+cat /etc/os-release
+
+php -v 2>/dev/null || true
+
+ps aux | grep -Ei '[p]hp|[p]hp-fpm' || true
+
+systemctl list-units --type=service --all 2>/dev/null \
+ | grep -Ei 'php|fpm' || true
+
+apache2ctl -M 2>/dev/null | grep -i php || true
+httpd -M 2>/dev/null | grep -i php || true
