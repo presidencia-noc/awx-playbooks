@@ -49,27 +49,35 @@
       failed_when: false
 
     # ============================================================
-    # SISTEMA OPERATIVO
+    # VERSION DE ORACLE LINUX
     # ============================================================
 
     - name: Obtener version de Oracle Linux
       ansible.builtin.raw: |
         if [ -r /etc/oracle-release ]; then
+
           cat /etc/oracle-release
+
         elif [ -r /etc/redhat-release ]; then
+
           cat /etc/redhat-release
+
         elif [ -r /etc/os-release ]; then
+
           . /etc/os-release
           printf '%s\n' "${PRETTY_NAME:-Linux}"
+
         else
-          printf '%s\n' "Linux - VERSION NO DETECTADA"
+
+          printf '%s\n' "Oracle Linux - VERSION NO DETECTADA"
+
         fi
       register: oracle_os
       changed_when: false
       failed_when: false
 
     # ============================================================
-    # PHP DEL HOST
+    # PHP INSTALADO EN EL HOST
     # ============================================================
 
     - name: Detectar PHP instalado en el host
@@ -81,116 +89,35 @@
           RAMA="$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null)"
 
           if [ -n "$VERSION" ]; then
+
             printf '%s|%s\n' "$VERSION" "$RAMA"
+
           else
+
             printf '%s|%s\n' "NO INSTALADO" "N/A"
+
           fi
 
         else
+
           printf '%s|%s\n' "NO INSTALADO" "N/A"
+
         fi
       register: oracle_php_host
       changed_when: false
       failed_when: false
 
     # ============================================================
-    # DOCKER
-    # ============================================================
-
-    - name: Comprobar si Docker esta instalado y operativo
-      ansible.builtin.raw: |
-        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-          printf '%s\n' "SI"
-        else
-          printf '%s\n' "NO"
-        fi
-      register: oracle_docker
-      changed_when: false
-      failed_when: false
-
-    # ============================================================
-    # CONTENEDORES DOCKER
+    # CREAR ESTRUCTURA DEL INFORME
     #
-    # La salida utiliza:
+    # Mantenemos la misma estructura utilizada por el playbook
+    # Linux normal para que n8n pueda procesarlo sin modificaciones.
     #
-    # nombre|imagen|version_php|rama_php
-    #
-    # Los contenedores sin PHP tambien son recopilados.
-    # n8n se encarga posteriormente de descartarlos.
+    # docker_instalado = false
+    # contenedores = []
     # ============================================================
 
-    - name: Auditar PHP en contenedores Docker
-      ansible.builtin.raw: |
-        if ! command -v docker >/dev/null 2>&1; then
-          exit 0
-        fi
-
-        if ! docker info >/dev/null 2>&1; then
-          exit 0
-        fi
-
-        docker ps --format '{% raw %}{{.Names}}|{{.Image}}{% endraw %}' 2>/dev/null |
-        while IFS='|' read -r CONTAINER IMAGE; do
-
-          [ -z "$CONTAINER" ] && continue
-
-          RESULTADO="$(docker exec "$CONTAINER" sh -c '
-            PHP_BIN=""
-
-            if command -v php >/dev/null 2>&1; then
-              PHP_BIN="$(command -v php)"
-            elif [ -x /usr/local/bin/php ]; then
-              PHP_BIN="/usr/local/bin/php"
-            elif [ -x /usr/bin/php ]; then
-              PHP_BIN="/usr/bin/php"
-            fi
-
-            if [ -n "$PHP_BIN" ]; then
-
-              VERSION="$("$PHP_BIN" -r "echo PHP_VERSION;" 2>/dev/null)"
-              RAMA="$("$PHP_BIN" -r "echo PHP_MAJOR_VERSION . \".\" . PHP_MINOR_VERSION;" 2>/dev/null)"
-
-              if [ -n "$VERSION" ]; then
-                printf "%s|%s\n" "$VERSION" "$RAMA"
-              else
-                printf "%s|%s\n" "NO INSTALADO" "N/A"
-              fi
-
-            else
-              printf "%s|%s\n" "NO INSTALADO" "N/A"
-            fi
-          ' 2>/dev/null)"
-
-          RET=$?
-
-          if [ "$RET" -eq 0 ] && [ -n "$RESULTADO" ]; then
-
-            PHP_VERSION="$(printf '%s\n' "$RESULTADO" | cut -d'|' -f1)"
-            PHP_RAMA="$(printf '%s\n' "$RESULTADO" | cut -d'|' -f2)"
-
-          else
-
-            PHP_VERSION="NO INSTALADO"
-            PHP_RAMA="N/A"
-
-          fi
-
-          printf '%s|%s|%s|%s\n' \
-            "$CONTAINER" \
-            "$IMAGE" \
-            "$PHP_VERSION" \
-            "$PHP_RAMA"
-
-        done
-      register: oracle_docker_php
-      changed_when: false
-      failed_when: false
-
-    # ============================================================
-    # GENERAR OBJETO PRINCIPAL DEL HOST
-    # ============================================================
-
-    - name: Inicializar estructura de auditoria Oracle
+    - name: Crear resultado de auditoria Oracle
       ansible.builtin.set_fact:
         auditoria_php:
           hostname: >-
@@ -235,55 +162,12 @@
               | default('N/A')
             }}
 
-          docker_instalado: >-
-            {{
-              (
-                oracle_docker.stdout
-                | default('NO')
-                | trim
-              ) == 'SI'
-            }}
+          docker_instalado: false
 
           contenedores: []
 
     # ============================================================
-    # TRANSFORMAR SALIDA DOCKER EN OBJETOS
-    # ============================================================
-
-    - name: Incorporar contenedores al resultado Oracle
-      ansible.builtin.set_fact:
-        auditoria_php: >-
-          {{
-            auditoria_php
-            | combine({
-                'contenedores':
-                  auditoria_php.contenedores
-                  +
-                  [{
-                    'nombre':
-                      item.split('|')[0],
-
-                    'imagen':
-                      item.split('|')[1],
-
-                    'php_version':
-                      item.split('|')[2],
-
-                    'php_rama':
-                      (
-                        item.split('|')[3]
-                        | default('N/A')
-                      )
-                  }]
-              })
-          }}
-      loop: "{{ oracle_docker_php.stdout_lines | default([]) }}"
-      when:
-        - item | trim | length > 0
-        - item.split('|') | length >= 3
-
-    # ============================================================
-    # MOSTRAR RESULTADO INDIVIDUAL
+    # MOSTRAR RESULTADO INDIVIDUAL EN AWX
     # ============================================================
 
     - name: Mostrar resultado individual Oracle Linux
@@ -294,14 +178,9 @@
           sistema_operativo: "{{ auditoria_php.sistema_operativo }}"
           php_host_version: "{{ auditoria_php.php_host_version }}"
           php_host_rama: "{{ auditoria_php.php_host_rama }}"
-          docker_instalado: "{{ auditoria_php.docker_instalado }}"
-          contenedores: "{{ auditoria_php.contenedores }}"
 
     # ============================================================
     # CONSOLIDACION
-    #
-    # Solo entran hosts que consiguieron generar auditoria_php.
-    # Un host con error SSH no genera esta variable y queda fuera.
     # ============================================================
 
     - name: Consolidar resultados Oracle Linux
@@ -319,7 +198,7 @@
       become: false
 
     # ============================================================
-    # RESUMEN AWX
+    # RESUMEN EN AWX
     # ============================================================
 
     - name: Mostrar cantidad de Oracle Linux auditados
@@ -333,10 +212,7 @@
       become: false
 
     # ============================================================
-    # ENVIAR A N8N
-    #
-    # Utiliza exactamente el mismo formato que el playbook
-    # principal para no modificar el workflow existente.
+    # ENVIAR RESULTADO A N8N
     # ============================================================
 
     - name: Enviar informe Oracle Linux al webhook de n8n
@@ -371,10 +247,10 @@
       become: false
 
     # ============================================================
-    # RESPUESTA N8N
+    # CONFIRMACION
     # ============================================================
 
-    - name: Mostrar respuesta de n8n
+    - name: Mostrar respuesta del webhook n8n
       ansible.builtin.debug:
         msg:
           - "Informe Oracle Linux enviado a n8n."
