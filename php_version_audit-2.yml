@@ -1,1048 +1,170 @@
-// ============================================================
-// PREPARAR REPORTE PHP
-// AWX -> n8n
-//
-// REPORTE:
-//
-// TABLA 1:
-// Solo hosts Linux que tengan PHP instalado directamente.
-//
-// TABLA 2:
-// Solo contenedores Docker que tengan PHP.
-//
-// Los contenedores sin PHP quedan excluidos.
-// Los hosts sin PHP en el host y sin PHP en Docker no aparecen
-// en las tablas, aunque siguen contando como hosts auditados.
-// ============================================================
-
-
-// ============================================================
-// 1. ENTRADA
-// ============================================================
-
-const entrada = $input.first().json;
-const datos = entrada.body ?? entrada;
-
-const fechaAuditoria =
-  datos.fecha_auditoria ||
-  new Date().toISOString();
-
-const hosts =
-  Array.isArray(datos.hosts)
-    ? datos.hosts
-    : [];
-
-
-// ============================================================
-// 2. FUNCIONES AUXILIARES
-// ============================================================
-
-function texto(valor, defecto = 'N/A') {
-  if (
-    valor === undefined ||
-    valor === null ||
-    String(valor).trim() === ''
-  ) {
-    return defecto;
-  }
-
-  return String(valor).trim();
-}
-
-
-function escaparHtml(valor) {
-  return String(valor ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-
-
-// ============================================================
-// 3. VALIDAR VERSION PHP
-//
-// Acepta, por ejemplo:
-//
-// 7.4
-// 7.4.3
-// 8.1.2
-// 8.2.35
-// 8.3.27
-// 8.4.1
-//
-// Rechaza:
-//
-// NO INSTALADO
-// NO PHP
-// N/A
-// NO DETERMINADO
-// OCI runtime exec failed...
-// sh: not found
-// etc.
-// ============================================================
-
-function esVersionPhpValida(valor) {
-  if (
-    valor === undefined ||
-    valor === null
-  ) {
-    return false;
-  }
-
-  const version =
-    String(valor).trim();
-
-  if (version === '') {
-    return false;
-  }
-
-  return /^\d+\.\d+(?:\.\d+)?/.test(version);
-}
-
-
-// ============================================================
-// 4. OBTENER RAMA PHP
-// ============================================================
-
-function obtenerRama(version) {
-  if (!esVersionPhpValida(version)) {
-    return 'N/A';
-  }
-
-  const coincidencia =
-    String(version)
-      .trim()
-      .match(/^(\d+)\.(\d+)/);
-
-  if (!coincidencia) {
-    return 'N/A';
-  }
-
-  return `${coincidencia[1]}.${coincidencia[2]}`;
-}
-
-
-// ============================================================
-// 5. PHP INSTALADO EN EL HOST
-// ============================================================
-
-function obtenerPhpHost(host) {
-  const version =
-    texto(
-      host.php_host_version,
-      ''
-    );
-
-  if (esVersionPhpValida(version)) {
-    return version;
-  }
-
-  return null;
-}
-
-
-// ============================================================
-// 6. PHP INSTALADO EN CONTENEDOR
-// ============================================================
-
-function obtenerPhpContenedor(contenedor) {
-  const version =
-    texto(
-      contenedor?.php_version,
-      ''
-    );
-
-  if (esVersionPhpValida(version)) {
-    return version;
-  }
-
-  return null;
-}
-
-
-// ============================================================
-// 7. OBTENER UNICAMENTE CONTENEDORES CON PHP
-// ============================================================
-
-function obtenerContenedoresPhp(host) {
-  if (!Array.isArray(host?.contenedores)) {
-    return [];
-  }
-
-  return host.contenedores.filter(
-    contenedor =>
-      obtenerPhpContenedor(contenedor) !== null
-  );
-}
-
-
-// ============================================================
-// 8. ORDENAR HOSTS ALFABETICAMENTE
-// ============================================================
-
-const hostsOrdenados =
-  [...hosts].sort(
-    (a, b) =>
-      texto(
-        a.hostname,
-        a.inventory_hostname || ''
-      ).localeCompare(
-        texto(
-          b.hostname,
-          b.inventory_hostname || ''
-        ),
-        'es',
-        {
-          sensitivity: 'base'
-        }
-      )
-  );
-
-
-// ============================================================
-// 9. SEPARAR HOSTS RELEVANTES
-// ============================================================
-
-// Hosts con PHP instalado directamente en Linux.
-
-const hostsConPhp =
-  hostsOrdenados.filter(
-    host =>
-      obtenerPhpHost(host) !== null
-  );
-
-
-// Hosts con por lo menos un contenedor con PHP.
-
-const hostsConPhpDocker =
-  hostsOrdenados.filter(
-    host =>
-      obtenerContenedoresPhp(host).length > 0
-  );
-
-
-// ============================================================
-// 10. VARIABLES DE SALIDA
-// ============================================================
-
-const filasCsv = [];
-
-let filasHostsHtml = '';
-let filasDockerHtml = '';
-
-
-// ============================================================
-// 11. TABLA SUPERIOR
-//
-// SOLAMENTE HOSTS DONDE PHP ESTA INSTALADO EN LINUX
-// ============================================================
-
-for (const host of hostsConPhp) {
-  const hostname =
-    texto(
-      host.hostname,
-      host.inventory_hostname || 'DESCONOCIDO'
-    );
-
-  const ip =
-    texto(
-      host.ip,
-      'NO DETECTADA'
-    );
-
-  const sistema =
-    texto(
-      host.sistema_operativo,
-      'NO DETECTADO'
-    );
-
-  const phpHost =
-    obtenerPhpHost(host);
-
-  const ramaHost =
-    obtenerRama(phpHost);
-
-
-  // ----------------------------------------------------------
-  // HTML
-  // ----------------------------------------------------------
-
-  filasHostsHtml += `
-    <tr>
-
-      <td style="border:1px solid #cccccc;padding:8px;">
-        ${escaparHtml(hostname)}
-      </td>
-
-      <td style="border:1px solid #cccccc;padding:8px;">
-        ${escaparHtml(ip)}
-      </td>
-
-      <td style="border:1px solid #cccccc;padding:8px;">
-        ${escaparHtml(sistema)}
-      </td>
-
-      <td style="border:1px solid #cccccc;padding:8px;font-weight:bold;">
-        ${escaparHtml(phpHost)}
-      </td>
-
-      <td style="border:1px solid #cccccc;padding:8px;">
-        ${escaparHtml(ramaHost)}
-      </td>
-
-    </tr>
-  `;
-
-
-  // ----------------------------------------------------------
-  // CSV
-  //
-  // Una fila independiente para el PHP instalado en el host.
-  // ----------------------------------------------------------
-
-  filasCsv.push({
-    'Tipo':
-      'PHP Host',
-
-    'Host':
-      hostname,
-
-    'IP':
-      ip,
-
-    'Sistema operativo':
-      sistema,
-
-    'PHP host':
-      phpHost,
-
-    'Rama PHP host':
-      ramaHost,
-
-    'Contenedor':
-      '',
-
-    'Imagen Docker':
-      '',
-
-    'PHP contenedor':
-      '',
-
-    'Rama PHP contenedor':
-      ''
-  });
-}
-
-
-// ============================================================
-// 12. TABLA INFERIOR
-//
-// SOLAMENTE CONTENEDORES DONDE PHP FUE DETECTADO
-// ============================================================
-
-for (const host of hostsConPhpDocker) {
-  const hostname =
-    texto(
-      host.hostname,
-      host.inventory_hostname || 'DESCONOCIDO'
-    );
-
-  const ip =
-    texto(
-      host.ip,
-      'NO DETECTADA'
-    );
-
-  const sistema =
-    texto(
-      host.sistema_operativo,
-      'NO DETECTADO'
-    );
-
-  // El host puede perfectamente no tener PHP.
-  const phpHostDetectado =
-    obtenerPhpHost(host);
-
-  const phpHost =
-    phpHostDetectado !== null
-      ? phpHostDetectado
-      : 'NO INSTALADO';
-
-  const ramaHost =
-    phpHostDetectado !== null
-      ? obtenerRama(phpHostDetectado)
-      : 'N/A';
-
-
-  const contenedores =
-    obtenerContenedoresPhp(host);
-
-
-  for (const contenedor of contenedores) {
-    const nombreContenedor =
-      texto(
-        contenedor.nombre,
-        'SIN NOMBRE'
-      );
-
-    const imagen =
-      texto(
-        contenedor.imagen,
-        'NO DETECTADA'
-      );
-
-    const phpContenedor =
-      obtenerPhpContenedor(contenedor);
-
-    const ramaContenedor =
-      obtenerRama(
-        phpContenedor
-      );
-
-
-    // --------------------------------------------------------
-    // HTML
-    // --------------------------------------------------------
-
-    filasDockerHtml += `
-      <tr>
-
-        <td style="border:1px solid #cccccc;padding:8px;">
-          ${escaparHtml(hostname)}
-        </td>
-
-        <td style="border:1px solid #cccccc;padding:8px;">
-          ${escaparHtml(ip)}
-        </td>
-
-        <td style="border:1px solid #cccccc;padding:8px;">
-          ${escaparHtml(sistema)}
-        </td>
-
-        <td style="border:1px solid #cccccc;padding:8px;font-weight:bold;">
-          ${escaparHtml(nombreContenedor)}
-        </td>
-
-        <td style="border:1px solid #cccccc;padding:8px;">
-          ${escaparHtml(imagen)}
-        </td>
-
-        <td style="border:1px solid #cccccc;padding:8px;font-weight:bold;color:#1f4e78;">
-          ${escaparHtml(phpContenedor)}
-        </td>
-
-        <td style="border:1px solid #cccccc;padding:8px;">
-          ${escaparHtml(ramaContenedor)}
-        </td>
-
-      </tr>
-    `;
-
-
-    // --------------------------------------------------------
-    // CSV
-    // --------------------------------------------------------
-
-    filasCsv.push({
-      'Tipo':
-        'PHP Docker',
-
-      'Host':
-        hostname,
-
-      'IP':
-        ip,
-
-      'Sistema operativo':
-        sistema,
-
-      'PHP host':
-        phpHost,
-
-      'Rama PHP host':
-        ramaHost,
-
-      'Contenedor':
-        nombreContenedor,
-
-      'Imagen Docker':
-        imagen,
-
-      'PHP contenedor':
-        phpContenedor,
-
-      'Rama PHP contenedor':
-        ramaContenedor
-    });
-  }
-}
-
-
-// ============================================================
-// 13. TABLAS VACIAS
-// ============================================================
-
-if (filasHostsHtml === '') {
-  filasHostsHtml = `
-    <tr>
-
-      <td
-        colspan="5"
-        style="
-          border:1px solid #cccccc;
-          padding:12px;
-          text-align:center;
-          color:#666666;
-        "
-      >
-        No se detectaron hosts Linux con PHP instalado directamente.
-      </td>
-
-    </tr>
-  `;
-}
-
-
-if (filasDockerHtml === '') {
-  filasDockerHtml = `
-    <tr>
-
-      <td
-        colspan="7"
-        style="
-          border:1px solid #cccccc;
-          padding:12px;
-          text-align:center;
-          color:#666666;
-        "
-      >
-        No se detectaron contenedores Docker con PHP.
-      </td>
-
-    </tr>
-  `;
-}
-
-
-// ============================================================
-// 14. ESTADISTICAS
-// ============================================================
-
-const totalHostsAuditados =
-  hostsOrdenados.length;
-
-
-const totalHostsPhp =
-  hostsConPhp.length;
-
-
-const totalHostsDockerPhp =
-  hostsConPhpDocker.length;
-
-
-const totalContenedoresPhp =
-  hostsConPhpDocker.reduce(
-    (total, host) =>
-      total +
-      obtenerContenedoresPhp(host).length,
-    0
-  );
-
-
-// ============================================================
-// 15. FECHA
-// ============================================================
-
-let fechaLocal;
-
-try {
-  fechaLocal =
-    new Date(fechaAuditoria)
-      .toLocaleString(
-        'es-AR',
-        {
-          timeZone:
-            'America/Argentina/Buenos_Aires',
-
-          dateStyle:
-            'full',
-
-          timeStyle:
-            'medium'
-        }
-      );
-} catch (error) {
-  fechaLocal =
-    String(fechaAuditoria);
-}
-
-
-let fechaArchivo;
-
-try {
-  fechaArchivo =
-    new Date(fechaAuditoria)
-      .toISOString()
-      .slice(0, 10);
-} catch (error) {
-  fechaArchivo =
-    new Date()
-      .toISOString()
-      .slice(0, 10);
-}
-
-
-// ============================================================
-// 16. DATOS DEL CORREO
-// ============================================================
-
-const asuntoEmail =
-  `Auditoría de versiones PHP - ${fechaArchivo}`;
-
-
-const nombreArchivo =
-  `auditoria_php_${fechaArchivo}.csv`;
-
-
-// ============================================================
-// 17. HTML COMPLETO DEL EMAIL
-// ============================================================
-
-const reporteHtml = `
-<!DOCTYPE html>
-<html>
-
-<head>
-  <meta charset="UTF-8">
-</head>
-
-
-<body
-  style="
-    margin:0;
-    padding:0;
-    background:#f3f4f6;
-    font-family:Arial,Helvetica,sans-serif;
-    color:#1f2937;
-  "
->
-
-
-<div
-  style="
-    max-width:1400px;
-    margin:0 auto;
-    padding:25px;
-  "
->
-
-
-  <!-- ===================================================== -->
-  <!-- CABECERA -->
-  <!-- ===================================================== -->
-
-  <div
-    style="
-      background:#1f4e78;
-      color:#ffffff;
-      padding:24px;
-    "
-  >
-
-    <h1
-      style="
-        margin:0;
-        font-size:24px;
-      "
-    >
-      Auditoría de versiones PHP
-    </h1>
-
-    <p
-      style="
-        margin:8px 0 0 0;
-        font-size:14px;
-      "
-    >
-      Servidores Linux y contenedores Docker
-    </p>
-
-  </div>
-
-
-  <!-- ===================================================== -->
-  <!-- CONTENIDO -->
-  <!-- ===================================================== -->
-
-  <div
-    style="
-      background:#ffffff;
-      padding:25px;
-    "
-  >
-
-    <p>
-      <strong>Fecha de auditoría:</strong>
-      ${escaparHtml(fechaLocal)}
-    </p>
-
-
-    <!-- =================================================== -->
-    <!-- RESUMEN -->
-    <!-- =================================================== -->
-
-    <table
-      role="presentation"
-      style="
-        width:100%;
-        border-collapse:separate;
-        border-spacing:8px;
-        margin-bottom:30px;
-      "
-    >
-
-      <tr>
-
-        <td
-          style="
-            width:25%;
-            background:#e8f1f8;
-            padding:18px;
-            text-align:center;
-          "
-        >
-
-          <div
-            style="
-              font-size:28px;
-              font-weight:bold;
-              color:#1f4e78;
-            "
-          >
-            ${totalHostsAuditados}
-          </div>
-
-          <div style="font-size:13px;">
-            Hosts auditados
-          </div>
-
-        </td>
-
-
-        <td
-          style="
-            width:25%;
-            background:#edf7ed;
-            padding:18px;
-            text-align:center;
-          "
-        >
-
-          <div
-            style="
-              font-size:28px;
-              font-weight:bold;
-              color:#2e7d32;
-            "
-          >
-            ${totalHostsPhp}
-          </div>
-
-          <div style="font-size:13px;">
-            Hosts con PHP
-          </div>
-
-        </td>
-
-
-        <td
-          style="
-            width:25%;
-            background:#fff4e5;
-            padding:18px;
-            text-align:center;
-          "
-        >
-
-          <div
-            style="
-              font-size:28px;
-              font-weight:bold;
-              color:#b45309;
-            "
-          >
-            ${totalHostsDockerPhp}
-          </div>
-
-          <div style="font-size:13px;">
-            Hosts con PHP en Docker
-          </div>
-
-        </td>
-
-
-        <td
-          style="
-            width:25%;
-            background:#f3e8ff;
-            padding:18px;
-            text-align:center;
-          "
-        >
-
-          <div
-            style="
-              font-size:28px;
-              font-weight:bold;
-              color:#7e22ce;
-            "
-          >
-            ${totalContenedoresPhp}
-          </div>
-
-          <div style="font-size:13px;">
-            Contenedores con PHP
-          </div>
-
-        </td>
-
-      </tr>
-
-    </table>
-
-
-    <!-- =================================================== -->
-    <!-- PHP EN EL HOST -->
-    <!-- =================================================== -->
-
-    <h2
-      style="
-        color:#1f4e78;
-        font-size:19px;
-      "
-    >
-      Hosts Linux con PHP instalado
-    </h2>
-
-
-    <table
-      style="
-        width:100%;
-        border-collapse:collapse;
-        font-size:13px;
-      "
-    >
-
-      <thead>
-
-        <tr style="background:#d9eaf7;">
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            Host
-          </th>
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            IP
-          </th>
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            Sistema operativo
-          </th>
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            PHP
-          </th>
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            Rama
-          </th>
-
-        </tr>
-
-      </thead>
-
-
-      <tbody>
-
-        ${filasHostsHtml}
-
-      </tbody>
-
-    </table>
-
-
-    <!-- =================================================== -->
-    <!-- PHP EN DOCKER -->
-    <!-- =================================================== -->
-
-    <h2
-      style="
-        color:#b45309;
-        font-size:19px;
-        margin-top:36px;
-      "
-    >
-      Hosts Linux con PHP en contenedores Docker
-    </h2>
-
-
-    <table
-      style="
-        width:100%;
-        border-collapse:collapse;
-        font-size:13px;
-      "
-    >
-
-      <thead>
-
-        <tr style="background:#fde7c7;">
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            Host
-          </th>
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            IP
-          </th>
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            Sistema operativo
-          </th>
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            Contenedor
-          </th>
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            Imagen
-          </th>
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            PHP contenedor
-          </th>
-
-          <th style="border:1px solid #aaaaaa;padding:9px;">
-            Rama
-          </th>
-
-        </tr>
-
-      </thead>
-
-
-      <tbody>
-
-        ${filasDockerHtml}
-
-      </tbody>
-
-    </table>
-
-
-    <!-- =================================================== -->
-    <!-- PIE -->
-    <!-- =================================================== -->
-
-    <p
-      style="
-        margin-top:30px;
-        color:#666666;
-        font-size:12px;
-      "
-    >
-      El informe muestra únicamente instalaciones PHP detectadas.
-      Los hosts sin PHP y los contenedores sin PHP fueron excluidos
-      de las tablas.
-    </p>
-
-  </div>
-
-</div>
-
-</body>
-
-</html>
-`;
-
-
-// ============================================================
-// 18. EVITAR SALIDA VACIA
-// ============================================================
-
-if (filasCsv.length === 0) {
-  filasCsv.push({
-    'Tipo':
-      'Sin PHP detectado',
-
-    'Host':
-      '',
-
-    'IP':
-      '',
-
-    'Sistema operativo':
-      '',
-
-    'PHP host':
-      '',
-
-    'Rama PHP host':
-      '',
-
-    'Contenedor':
-      '',
-
-    'Imagen Docker':
-      '',
-
-    'PHP contenedor':
-      '',
-
-    'Rama PHP contenedor':
-      ''
-  });
-}
-
-
-// ============================================================
-// 19. SALIDA PARA N8N
-// ============================================================
-
-return filasCsv.map(
-  (fila, indice) => ({
-    json: {
-      ...fila,
-
-      reporte_html:
-        reporteHtml,
-
-      asunto_email:
-        asuntoEmail,
-
-      nombre_archivo:
-        nombreArchivo,
-
-      fecha_auditoria:
-        fechaAuditoria,
-
-      total_hosts:
-        totalHostsAuditados,
-
-      total_hosts_php:
-        totalHostsPhp,
-
-      total_hosts_php_docker:
-        totalHostsDockerPhp,
-
-      total_contenedores_php:
-        totalContenedoresPhp,
-
-      es_primera_fila:
-        indice === 0
-    }
-  })
-);
- 
+---
+- name: Auditoria de versiones PHP en hosts Linux y contenedores Docker
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    n8n_webhook_url: "https://n8n.presidencia.gob.ar/webhook/auditoria-php"
+
+  tasks:
+
+    # ============================================================
+    # INFORMACION GENERAL DEL HOST
+    # ============================================================
+
+    - name: Inicializar informacion del servidor
+      ansible.builtin.set_fact:
+        auditoria_php:
+          hostname: "{{ ansible_fqdn | default(ansible_hostname) }}"
+          inventory_hostname: "{{ inventory_hostname }}"
+          ip: >-
+            {{
+              ansible_default_ipv4.address
+              | default(ansible_all_ipv4_addresses[0] | default('NO DETECTADA'))
+            }}
+          sistema_operativo: >-
+            {{
+              ansible_distribution
+              ~ ' '
+              ~ ansible_distribution_version
+            }}
+          php_host_version: "NO INSTALADO"
+          php_host_rama: "N/A"
+          docker_instalado: false
+          contenedores: []
+
+    # ============================================================
+    # PHP INSTALADO EN EL HOST
+    # ============================================================
+
+    - name: Detectar version y rama PHP en el host
+      ansible.builtin.shell: |
+        if command -v php >/dev/null 2>&1; then
+          VERSION="$(php -r 'echo PHP_VERSION;' 2>/dev/null)"
+          RAMA="$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null)"
+          printf '%s|%s\n' "$VERSION" "$RAMA"
+        else
+          printf '%s|%s\n' "NO INSTALADO" "N/A"
+        fi
+      args:
+        executable: /bin/sh
+      register: php_host_result
+      changed_when: false
+      failed_when: false
+
+    - name: Guardar version y rama PHP del host
+      ansible.builtin.set_fact:
+        auditoria_php: >-
+          {{
+            auditoria_php
+            | combine({
+                'php_host_version':
+                  (
+                    php_host_result.stdout.split('|')[0]
+                    | default('NO INSTALADO')
+                  ),
+                'php_host_rama':
+                  (
+                    php_host_result.stdout.split('|')[1]
+                    | default('N/A')
+                  )
+              })
+          }}
+
+    # ============================================================
+    # DETECCION DE DOCKER
+    # ============================================================
+
+    - name: Comprobar si Docker esta instalado y operativo
+      ansible.builtin.shell: |
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+          echo "SI"
+        else
+          echo "NO"
+        fi
+      args:
+        executable: /bin/sh
+      register: docker_result
+      changed_when: false
+      failed_when: false
+
+    - name: Guardar estado de Docker
+      ansible.builtin.set_fact:
+        auditoria_php: >-
+          {{
+            auditoria_php
+            | combine({
+                'docker_instalado': docker_result.stdout == 'SI'
+              })
+          }}
+
+    # ============================================================
+    # CONTENEDORES DOCKER ACTIVOS
+    # ============================================================
+
+    - name: Obtener contenedores Docker en ejecucion
+      ansible.builtin.shell: |
+        docker ps --format '{% raw %}{{.Names}}|{{.Image}}{% endraw %}'
+      args:
+        executable: /bin/sh
+      register: docker_containers
+      changed_when: false
+      failed_when: false
+      when: auditoria_php.docker_instalado | bool
+
+    # ============================================================
+    # PHP DENTRO DE CADA CONTENEDOR
+    # ============================================================
+
+    - name: Consultar PHP dentro de cada contenedor
+      ansible.builtin.shell: |
+        CONTAINER="{{ item.split('|')[0] }}"
+
+        RESULTADO=$(docker exec "$CONTAINER" sh -c '
+          PHP_BIN=""
+
+          if command -v php >/dev/null 2>&1; then
+            PHP_BIN="$(command -v php)"
+          elif [ -x /usr/local/bin/php ]; then
+            PHP_BIN="/usr/local/bin/php"
+          elif [ -x /usr/bin/php ]; then
+            PHP_BIN="/usr/bin/php"
+          fi
+
+          if [ -n "$PHP_BIN" ]; then
+            VERSION="$("$PHP_BIN" -r "echo PHP_VERSION;" 2>/dev/null)"
+            RAMA="$("$PHP_BIN" -r "echo PHP_MAJOR_VERSION . \".\" . PHP_MINOR_VERSION;" 2>/dev/null)"
+
+            if [ -n "$VERSION" ]; then
+              printf "%s|%s\n" "$VERSION" "$RAMA"
+            else
+              printf "%s|%s\n" "NO INSTALADO" "N/A"
+            fi
+          else
+            printf "%s|%s\n" "NO INSTALADO" "N/A"
+          fi
+        ' 2>/dev/null)
+
+        RET=$?
+
+        if [ "$RET" -eq 0 ] && [ -n "$RESULTADO" ]; then
+          printf "%s\n" "$RESULTADO"
+        else
+          printf "%s|%s\n" "NO INSTALADO" "N/A"
+        fi
+      args:
+        executable: /bin/sh
+      loop: "{{ docker_containers.stdout_lines | default([]) }}"
+      register: php_docker_result
+      changed_when: false
+      failed_when: false
+      when:
+        - auditoria_php.docker_instalado | bool
+        - docker_containers.stdout_lines | default([]) | length > 0
+
+    # ============================================================
+    # INCORPORAR CONTENEDORES AL RESULTADO DEL HOST
+    # ============================================================
+
+  
